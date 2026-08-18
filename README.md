@@ -124,6 +124,24 @@ Ethereal SMTP Mailer (smtp.ethereal.email:587)
    - `/login` page with Google OAuth button.
    - `/dashboard` verification page calling `GET /api/auth/me` (`credentials: "include"`), displaying user details and Logout button (`POST /api/auth/logout`).
 
+## Dashboard Analytics & Campaign Management (Step 7)
+
+1. **Live-on-Refresh Analytics Endpoint (`GET /api/emails/stats`)**:
+   - Protected by `requireAuth` middleware.
+   - Executes efficient Prisma database `groupBy` and `count` queries strictly scoped to `where: { userId: req.user.id }`.
+   - Returns `{ scheduledCount, processingCount, sentCount, failedCount, totalCount, sendersCount }`.
+
+2. **Option A API Contracts**:
+   - `GET /api/emails/scheduled`: Returns `status = SCHEDULED` emails for authenticated user.
+   - `GET /api/emails/sent`: Returns `status = SENT` emails for authenticated user (preserves existing API contract 100%).
+   - `GET /api/emails/failed`: Returns `status = FAILED` emails for authenticated user.
+
+3. **Dashboard Management UI & Tabbed Navigation**:
+   - **Analytics Cards** (`AnalyticsCards.tsx`): Displays current live-on-refresh metrics cards (**Scheduled**, **Processing**, **Sent**, **Failed**, **Total Emails**, **Active Senders**) and manual **Refresh Analytics** button.
+   - **Scheduled Emails Table** (`ScheduledTable.tsx`): User-focused table of pending emails with search filter and status badges.
+   - **Sent & Failed History Table** (`SentTable.tsx`): Historical delivery table with Sent/Failed status filter tabs and search filter.
+   - **Quick Single Compose Modal** (`QuickComposeModal.tsx`): Modal allowing quick scheduling of a single email directly from dashboard via `POST /api/emails/schedule`.
+
 ---
 
 ## Ethereal Email SMTP Setup
@@ -153,7 +171,7 @@ npm run db:seed
 
 ## Current Implementation Status
 
-**Status: Step 6 (CSV Upload + Bulk Email Scheduling) Complete**
+**Status: Step 7 (Dashboard Scheduled/Sent Management, Analytics & Quick Compose UI) Complete**
 
 * [x] Step 0: Docker architecture set up
 * [x] Step 1A: PostgreSQL + Prisma schema (`User`, `Sender`, `Email`, `EmailStatus`) implemented
@@ -163,3 +181,4 @@ npm run db:seed
 * [x] Step 4: Distributed Redis Lua Rate Limiting, Minimum Inter-Send Delay, Authoritative Token Rollback, and BullMQ `DelayedError` rescheduling.
 * [x] Step 5: Real Google OAuth 2.0, Redis-backed Session Storage, Express `requireAuth` Middleware, Multi-User Data Isolation, Next.js `/login` & `/dashboard` Auth Foundation.
 * [x] Step 6: Memory-buffered Multer 2.2.0 & csv-parse 5.6.0 CSV Upload, Structural Header Validation, Recipient Sanitization & Preview, Campaign Setup UI, and Bulk Email Scheduling Pipeline.
+* [x] Step 7: Live-on-Refresh Analytics (`GET /api/emails/stats`), Option A API Contracts (`/scheduled`, `/sent`, `/failed`), Scheduled/Sent Management Tables, Quick Compose Modal, and Dashboard Navigation UI.
