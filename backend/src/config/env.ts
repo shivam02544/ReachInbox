@@ -13,6 +13,7 @@ export interface AppConfig {
   redisHost: string;
   redisPort: number;
   workerConcurrency: number;
+  maxRecipientsPerRequest: number;
   frontendUrl: string;
 }
 
@@ -32,6 +33,7 @@ export const config: AppConfig = {
   redisHost: getEnv('REDIS_HOST', 'redis'),
   redisPort: parseInt(process.env.REDIS_PORT || '6379', 10),
   workerConcurrency: parseInt(process.env.WORKER_CONCURRENCY || '5', 10),
+  maxRecipientsPerRequest: parseInt(process.env.MAX_RECIPIENTS_PER_REQUEST || '1000', 10),
   frontendUrl: process.env.FRONTEND_URL || 'http://localhost:3000',
 };
 

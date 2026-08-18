@@ -1,7 +1,7 @@
 import express, { Application } from 'express';
 import cors from 'cors';
 import healthRouter from './routes/health';
-import testQueueRouter from './routes/testQueue';
+import emailRouter from './routes/email.routes';
 import { notFoundHandler, globalErrorHandler } from './middleware/errorHandler';
 
 const app: Application = express();
@@ -11,9 +11,9 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Routes
+// Core API Routes
 app.use('/', healthRouter);
-app.use('/api/test', testQueueRouter);
+app.use('/api/emails', emailRouter);
 
 // Error handling middleware
 app.use(notFoundHandler);

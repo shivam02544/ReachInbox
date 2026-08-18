@@ -3,6 +3,7 @@ import { config } from '../config/env';
 import { logger } from '../utils/logger';
 
 export const EMAIL_QUEUE_NAME = 'email-queue';
+export const SEND_EMAIL_JOB_NAME = 'send-email';
 
 export const bullRedisConnectionOptions: ConnectionOptions = {
   host: config.redisHost,
@@ -14,35 +15,33 @@ export const emailQueue = new Queue(EMAIL_QUEUE_NAME, {
   connection: bullRedisConnectionOptions,
 });
 
-export interface TestJobPayload {
-  type: string;
-  message: string;
-  delayMs: number;
-  scheduledFor: string;
-  createdAt: string;
+export interface EmailJobPayload {
+  emailId: string;
 }
 
-export interface EnqueueTestJobResult {
+export interface EnqueueEmailJobResult {
   jobId: string;
   delayMs: number;
   scheduledFor: string;
   status: string;
 }
 
-export async function addTestJob(delayMs: number): Promise<EnqueueTestJobResult> {
-  const now = new Date();
-  const scheduledForDate = new Date(now.getTime() + delayMs);
-  const scheduledFor = scheduledForDate.toISOString();
+/**
+ * Enqueues a production delayed email job into BullMQ.
+ * 
+ * BullMQ jobId matches PostgreSQL Email.id for deterministic identification.
+ */
+export async function addEmailJob(emailId: string, scheduledAt: Date): Promise<EnqueueEmailJobResult> {
+  const now = Date.now();
+  const scheduledTime = scheduledAt.getTime();
+  const delayMs = Math.max(0, scheduledTime - now);
 
-  const payload: TestJobPayload = {
-    type: 'test',
-    message: 'BullMQ queue foundation test job',
-    delayMs,
-    scheduledFor,
-    createdAt: now.toISOString(),
+  const payload: EmailJobPayload = {
+    emailId,
   };
 
-  const job = await emailQueue.add('test-email-job', payload, {
+  const job = await emailQueue.add(SEND_EMAIL_JOB_NAME, payload, {
+    jobId: emailId, // Deterministic matching: BullMQ jobId = Email.id
     delay: delayMs,
     attempts: 3,
     backoff: {
@@ -50,21 +49,24 @@ export async function addTestJob(delayMs: number): Promise<EnqueueTestJobResult>
       delay: 1000,
     },
     removeOnComplete: {
-      age: 3600, // Retain completed jobs up to 1 hour
-      count: 100, // Retain max 100 recent completed jobs for inspection
+      age: 3600,   // Keep completed jobs up to 1 hour
+      count: 100,  // Keep max 100 recent completed jobs
     },
     removeOnFail: {
-      age: 86400, // Retain failed jobs up to 24 hours
-      count: 200, // Retain max 200 failed jobs for debugging
+      age: 86400,  // Keep failed jobs up to 24 hours
+      count: 200,  // Keep max 200 failed jobs
     },
   });
 
-  logger.info('API', `Enqueued BullMQ test job [ID: ${job.id}] with ${delayMs}ms delay (scheduled for ${scheduledFor})`);
+  logger.info(
+    'API',
+    `Enqueued BullMQ job [Job ID: ${job.id}] for Email [ID: ${emailId}] with ${delayMs}ms delay (Scheduled for ${scheduledAt.toISOString()})`
+  );
 
   return {
-    jobId: job.id || 'unknown',
+    jobId: job.id || emailId,
     delayMs,
-    scheduledFor,
+    scheduledFor: scheduledAt.toISOString(),
     status: 'enqueued',
   };
 }
