@@ -6,6 +6,7 @@ import { configurePassport } from './config/passport';
 import healthRouter from './routes/health';
 import emailRouter from './routes/email.routes';
 import authRouter from './routes/auth.routes';
+import senderRouter from './routes/sender.routes';
 import { notFoundHandler, globalErrorHandler } from './middleware/errorHandler';
 
 const app: Application = express();
@@ -29,7 +30,7 @@ app.use(passport.initialize());
 app.use('/', healthRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/emails', emailRouter);
-app.use('/api/senders', emailRouter);
+app.use('/api/senders', senderRouter);
 
 // Error handling middleware
 app.use(notFoundHandler);
