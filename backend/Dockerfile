@@ -3,6 +3,9 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
+# Install OpenSSL required by Prisma engine on Alpine
+RUN apk add --no-cache openssl
+
 # Copy package descriptors
 COPY package*.json tsconfig.json ./
 COPY prisma ./prisma/
@@ -19,6 +22,9 @@ RUN npm run build
 FROM node:20-alpine AS runner
 
 WORKDIR /app
+
+# Install OpenSSL in runtime container
+RUN apk add --no-cache openssl
 
 ENV NODE_ENV=production
 
