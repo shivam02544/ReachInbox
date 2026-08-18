@@ -5,6 +5,8 @@ import {
   scheduleEmailsController,
   getScheduledEmailsController,
   getSentEmailsController,
+  getFailedEmailsController,
+  getEmailStatsController,
   parseCsvController,
   getSendersController,
 } from '../controllers/email.controller';
@@ -28,10 +30,16 @@ router.get('/senders', requireAuth, getSendersController);
 // Schedule email batch (Protected)
 router.post('/schedule', requireAuth, scheduleEmailsController);
 
+// Get dashboard email analytics stats (Protected)
+router.get('/stats', requireAuth, getEmailStatsController);
+
 // List scheduled emails (Protected)
 router.get('/scheduled', requireAuth, getScheduledEmailsController);
 
 // List sent emails (Protected)
 router.get('/sent', requireAuth, getSentEmailsController);
+
+// List failed emails (Protected)
+router.get('/failed', requireAuth, getFailedEmailsController);
 
 export default router;

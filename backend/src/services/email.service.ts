@@ -245,3 +245,21 @@ export async function getSentEmails(userId: string) {
     orderBy: { sentAt: 'desc' },
   });
 }
+
+export async function getFailedEmails(userId: string) {
+  return prisma.email.findMany({
+    where: { userId, status: EmailStatus.FAILED },
+    select: {
+      id: true,
+      senderId: true,
+      recipient: true,
+      subject: true,
+      status: true,
+      scheduledAt: true,
+      sentAt: true,
+      attempts: true,
+      createdAt: true,
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+}

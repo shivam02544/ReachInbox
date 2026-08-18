@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { scheduleEmailsBatch, getScheduledEmails, getSentEmails, CustomServiceError } from '../services/email.service';
+import { scheduleEmailsBatch, getScheduledEmails, getSentEmails, getFailedEmails, CustomServiceError } from '../services/email.service';
 import { parseCsvBuffer } from '../utils/csvParser';
 import { sanitizeRecipients } from '../utils/emailValidation';
 import { prisma } from '../config/prisma';
@@ -119,6 +119,61 @@ export async function getSentEmailsController(req: Request, res: Response, next:
     res.status(200).json({
       count: emails.length,
       emails,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function getFailedEmailsController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const userId = req.user!.id;
+    const emails = await getFailedEmails(userId);
+    res.status(200).json({
+      count: emails.length,
+      emails,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function getEmailStatsController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const userId = req.user!.id;
+
+    const [statusCounts, sendersCount] = await Promise.all([
+      prisma.email.groupBy({
+        by: ['status'],
+        where: { userId },
+        _count: { status: true },
+      }),
+      prisma.sender.count({
+        where: { userId },
+      }),
+    ]);
+
+    let scheduledCount = 0;
+    let processingCount = 0;
+    let sentCount = 0;
+    let failedCount = 0;
+
+    for (const group of statusCounts) {
+      if (group.status === 'SCHEDULED') scheduledCount = group._count.status;
+      if (group.status === 'PROCESSING') processingCount = group._count.status;
+      if (group.status === 'SENT') sentCount = group._count.status;
+      if (group.status === 'FAILED') failedCount = group._count.status;
+    }
+
+    const totalCount = scheduledCount + processingCount + sentCount + failedCount;
+
+    res.status(200).json({
+      scheduledCount,
+      processingCount,
+      sentCount,
+      failedCount,
+      totalCount,
+      sendersCount,
     });
   } catch (error) {
     next(error);
