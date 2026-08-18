@@ -1,12 +1,29 @@
 import { Router } from 'express';
+import multer from 'multer';
+import { config } from '../config/env';
 import {
   scheduleEmailsController,
   getScheduledEmailsController,
   getSentEmailsController,
+  parseCsvController,
+  getSendersController,
 } from '../controllers/email.controller';
 import { requireAuth } from '../middleware/auth.middleware';
 
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: config.maxCsvFileSizeMb * 1024 * 1024,
+  },
+});
+
 const router = Router();
+
+// Parse CSV file for preview (Protected)
+router.post('/parse-csv', requireAuth, upload.single('file'), parseCsvController);
+
+// Get available senders for dropdown (Protected)
+router.get('/senders', requireAuth, getSendersController);
 
 // Schedule email batch (Protected)
 router.post('/schedule', requireAuth, scheduleEmailsController);

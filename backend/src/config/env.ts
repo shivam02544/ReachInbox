@@ -16,6 +16,7 @@ export interface AppConfig {
   maxRecipientsPerRequest: number;
   minEmailDelayMs: number;
   maxEmailsPerHourPerSender: number;
+  maxCsvFileSizeMb: number;
   frontendUrl: string;
   ethereal: {
     host: string;
@@ -54,6 +55,7 @@ export const config: AppConfig = {
   maxRecipientsPerRequest: parseInt(process.env.MAX_RECIPIENTS_PER_REQUEST || '1000', 10),
   minEmailDelayMs: parseInt(process.env.MIN_EMAIL_DELAY_MS || '2000', 10),
   maxEmailsPerHourPerSender: parseInt(process.env.MAX_EMAILS_PER_HOUR_PER_SENDER || '200', 10),
+  maxCsvFileSizeMb: parseInt(process.env.MAX_CSV_FILE_SIZE_MB || '5', 10),
   frontendUrl: process.env.FRONTEND_URL || 'http://localhost:3000',
   ethereal: {
     host: process.env.ETHEREAL_HOST || 'smtp.ethereal.email',

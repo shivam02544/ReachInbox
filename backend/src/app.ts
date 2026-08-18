@@ -29,6 +29,7 @@ app.use(passport.initialize());
 app.use('/', healthRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/emails', emailRouter);
+app.use('/api/senders', emailRouter);
 
 // Error handling middleware
 app.use(notFoundHandler);

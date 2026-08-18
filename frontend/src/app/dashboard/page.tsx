@@ -2,6 +2,9 @@
 
 import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { CsvUploader, CsvPreviewData } from '../../components/CsvUploader';
+import { CsvPreview } from '../../components/CsvPreview';
+import { BulkScheduleForm } from '../../components/BulkScheduleForm';
 
 interface UserProfile {
   id: string;
@@ -16,6 +19,7 @@ export default function DashboardPage() {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  const [csvPreview, setCsvPreview] = useState<CsvPreviewData | null>(null);
 
   useEffect(() => {
     async function checkAuthStatus() {
@@ -97,63 +101,62 @@ export default function DashboardPage() {
   }
 
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center p-8 bg-slate-950 text-white">
-      <div className="max-w-lg w-full p-8 rounded-2xl bg-slate-900 border border-slate-800 shadow-2xl">
-        <div className="flex items-center justify-between mb-8 pb-6 border-b border-slate-800">
+    <main className="flex min-h-screen flex-col items-center justify-start p-6 md:p-10 bg-slate-950 text-white">
+      <div className="max-w-4xl w-full space-y-6">
+        {/* Header Bar */}
+        <div className="flex items-center justify-between p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl">
           <div className="flex items-center gap-3">
             {user.avatarUrl ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
                 src={user.avatarUrl}
                 alt={user.name}
-                className="w-12 h-12 rounded-full border-2 border-indigo-500/30 object-cover"
+                className="w-11 h-11 rounded-full border-2 border-indigo-500/30 object-cover"
               />
             ) : (
-              <div className="w-12 h-12 rounded-full bg-indigo-600/30 text-indigo-400 flex items-center justify-center font-bold text-lg border border-indigo-500/20">
+              <div className="w-11 h-11 rounded-full bg-indigo-600/30 text-indigo-400 flex items-center justify-center font-bold text-base border border-indigo-500/20">
                 {user.name.charAt(0)}
               </div>
             )}
             <div>
-              <h2 className="text-lg font-bold text-white leading-tight">{user.name}</h2>
+              <h2 className="text-base font-bold text-white leading-tight">{user.name}</h2>
               <p className="text-xs text-slate-400 font-mono">{user.email}</p>
             </div>
           </div>
-          <button
-            id="logout-button"
-            onClick={handleLogout}
-            className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold border border-slate-700 transition-all active:scale-95"
-          >
-            Logout
-          </button>
+
+          <div className="flex items-center gap-4">
+            <span className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+              Authenticated Session
+            </span>
+            <button
+              id="logout-button"
+              onClick={handleLogout}
+              className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold border border-slate-700 transition-all active:scale-95"
+            >
+              Logout
+            </button>
+          </div>
         </div>
 
-        <div className="space-y-4">
-          <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800/80">
-            <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">
-              Authentication Verification Status
-            </h3>
-            <div className="space-y-2 text-xs">
-              <div className="flex justify-between">
-                <span className="text-slate-500">Status:</span>
-                <span className="text-emerald-400 font-semibold inline-flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                  Authenticated
-                </span>
+        {/* Step 6 Bulk Email Scheduling Workflow */}
+        <div className="space-y-6">
+          {!csvPreview ? (
+            <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-4">
+              <div className="space-y-1">
+                <h3 className="text-base font-bold text-white">Bulk Email Campaign Upload</h3>
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  Upload a contacts CSV file containing an <code className="text-indigo-300 font-mono">email</code> header column to parse, validate, and preview recipients before scheduling.
+                </p>
               </div>
-              <div className="flex justify-between">
-                <span className="text-slate-500">PostgreSQL User ID:</span>
-                <span className="text-slate-300 font-mono text-[11px]">{user.id}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-slate-500">Google ID:</span>
-                <span className="text-slate-300 font-mono text-[11px]">{user.googleId}</span>
-              </div>
+              <CsvUploader onPreviewSuccess={(data) => setCsvPreview(data)} />
             </div>
-          </div>
-
-          <div className="p-4 rounded-xl bg-emerald-950/20 border border-emerald-500/20 text-xs text-emerald-400/90 leading-relaxed">
-            Step 5 Real Google OAuth foundation active. Server-side Redis session created, HTTP-only cookie set, and Express auth middleware verified.
-          </div>
+          ) : (
+            <div className="space-y-6">
+              <CsvPreview data={csvPreview} onClear={() => setCsvPreview(null)} />
+              <BulkScheduleForm validRecipients={csvPreview.validRecipients} />
+            </div>
+          )}
         </div>
       </div>
     </main>
