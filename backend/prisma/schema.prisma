@@ -9,4 +9,8 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// Business models (User, Email, Sender, etc.) will be defined in subsequent implementation steps.
+// System initialization model for Prisma setup & dependency health check
+model SystemInit {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+}
