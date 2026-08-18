@@ -26,7 +26,10 @@ BullMQ Queue (`email-queue`)
 Worker Container (Separate Process, Same Codebase)
    │
    ▼
-Simulated Email Delivery (Step 2) / Ethereal SMTP Mailer (Step 3+)
+Nodemailer Mail Service (src/services/mail.service.ts)
+   │
+   ▼
+Ethereal SMTP Mailer (smtp.ethereal.email:587)
 ```
 
 * **Process Separation**: The Express API server (`backend`) handles HTTP requests. A separate container (`worker`) runs independently to consume background jobs. Both share the backend codebase (`./backend`) but execute different startup scripts.
@@ -40,6 +43,7 @@ Simulated Email Delivery (Step 2) / Ethereal SMTP Mailer (Step 3+)
 * **Backend API**: Node.js (`v20`), Express.js (`4.21.1`), TypeScript
 * **Database & ORM**: PostgreSQL (`16-alpine`), Prisma ORM (`5.22.0`)
 * **Queue & Cache**: BullMQ (`5.21.2`), Redis (`7-alpine`), `ioredis` (`5.4.1`)
+* **Email Delivery**: Nodemailer (`6.9.16`), Ethereal Email SMTP
 * **Infrastructure**: Docker, Docker Compose
 
 ---
@@ -54,7 +58,7 @@ reachinbox-assignment/
 │   │   ├── middleware/      # Error & 404 handlers
 │   │   ├── routes/          # API routes (email.routes.ts, health.ts)
 │   │   ├── controllers/     # Email request controllers (email.controller.ts)
-│   │   ├── services/        # Email batch scheduling & query logic (email.service.ts)
+│   │   ├── services/        # Email batch scheduling (email.service.ts) & Nodemailer SMTP (mail.service.ts)
 │   │   ├── queues/          # BullMQ queue producer (email.queue.ts) & worker (email.worker.ts)
 │   │   ├── utils/           # Logger, SHA-256 idempotency, RFC 5322 email validator
 │   │   ├── app.ts           # Express app setup
@@ -83,101 +87,96 @@ reachinbox-assignment/
 
 ---
 
-## Email Scheduling Pipeline Architecture
+## Ethereal Email SMTP Setup
+
+1. **Test Account Creation**: Ethereal test accounts can be generated via Nodemailer CLI (`node -e "require('nodemailer').createTestAccount().then(console.log)"`).
+2. **Environment Variables** (`.env`):
+   ```ini
+   ETHEREAL_HOST=smtp.ethereal.email
+   ETHEREAL_PORT=587
+   ETHEREAL_USER=x6wf6elp3ert62r3@ethereal.email
+   ETHEREAL_PASSWORD=jREstXBKhb1Rjw1txP
+   ETHEREAL_SECURE=false
+   ```
+3. **Sender-Specific Credentials**: In PostgreSQL, every `Sender` record contains `smtpHost`, `smtpPort`, `smtpUser`, and `smtpPassword`. The worker dynamically constructs transport for each `Email.senderId`.
+4. **Ethereal Preview URLs**: After successful SMTP delivery, Nodemailer generates a preview URL logged in worker output: `[Ethereal Preview URL] https://ethereal.email/message/...`
+
+---
+
+## Sender-Specific SMTP Architecture
 
 ```
-POST /api/emails/schedule
-          │
-          ▼
-Validate Request & Sender Existence (PostgreSQL)
-          │
-          ▼
-Sanitize Recipients & Filter Invalid Emails
-          │
-          ▼
-For Each Recipient:
-  1. Calculate scheduledAt = startTime + (index * delayMs)
-  2. Compute SHA-256 Idempotency Key
-  3. Check PostgreSQL for Existing Idempotency Key
-     ├── Exists -> Skip (increment alreadyExistsCount)
-     └── New    -> Insert Email row (status = SCHEDULED)
-          │
-          ▼
-Enqueue BullMQ Job (jobId = Email.id, delay = scheduledAt - now)
-Update Email.bullJobId in PostgreSQL
-          │
-          ▼
-BullMQ Worker Container (email-queue)
-  1. Fetch Email from PostgreSQL by ID
-  2. Check Status (If SENT -> Skip safely)
-  3. Atomic Transition: SCHEDULED -> PROCESSING (attempts + 1)
-  4. Simulated Email Send (Logs delivery)
-  5. Atomic Transition: PROCESSING -> SENT (sentAt = now)
+Email.senderId
+      │
+      ▼
+PostgreSQL Sender Record
+      │
+      ├──> smtpHost
+      ├──> smtpPort
+      ├──> smtpUser
+      └──> smtpPassword
+            │
+            ▼
+Nodemailer Transporter (src/services/mail.service.ts)
+            │
+            ▼
+sendMail({ from: "${displayName} <${email}>", to, subject, text })
 ```
 
 ---
 
-## PostgreSQL + BullMQ Relationship & Trade-Offs
+## Retry Semantics & Attempt Alignment
+
+```
+[ SCHEDULED ] ──(Worker Claims Job)──► [ PROCESSING ] ──(SMTP Send)──► [ SENT ]
+      ▲                                       │
+      │                             (Retryable Failure)
+      └───────────────────────────────────────┤
+                                              │
+                                     (Final Attempt Exhausted)
+                                              ▼
+                                         [ FAILED ]
+```
+
+* **`EmailStatus` Enum**: Kept strictly as `SCHEDULED`, `PROCESSING`, `SENT`, `FAILED`. `SCHEDULED` represents both initially scheduled emails and emails waiting for a BullMQ retry.
+* **`scheduledAt` Preservation**: Original `scheduledAt` timestamp is preserved without alteration during retries.
+* **Atomic `Email.attempts` Counter**: Incremented **exactly once** when transitioning from `SCHEDULED` to `PROCESSING`.
+* **Explicit Final Attempt Calculation**:
+  ```typescript
+  const currentAttempt = job.attemptsMade + 1;
+  const maxAttempts = job.opts.attempts ?? 1;
+  const isFinalAttempt = currentAttempt >= maxAttempts;
+  ```
+  * **Retryable Failure (`!isFinalAttempt`)**: Status reset to `SCHEDULED`, error logged, re-thrown for BullMQ backoff.
+  * **Final Failure (`isFinalAttempt`)**: Status updated to `FAILED` with sanitized `errorMessage`. `Email.attempts` equals 3.
+
+---
+
+## Distributed System Architectural Trade-Offs
 
 > [!IMPORTANT]
-> **Distributed Systems Trade-Off**: PostgreSQL and Redis are separate infrastructure systems and do not share an ACID transaction.
+> **SMTP + PostgreSQL Failure Window**:
+> Ethereal SMTP and PostgreSQL are separate distributed systems and do not share a single ACID transaction.
 >
-> 1. **PostgreSQL as Authoritative Store**: PostgreSQL holds the persistent, canonical state of all scheduled, processing, sent, and failed emails.
-> 2. **BullMQ as Execution Engine**: Redis stores the delayed execution state (`email-queue`).
-> 3. **Deterministic Job Matching**: Every BullMQ job ID is explicitly set to the PostgreSQL `Email.id` (`jobId = Email.id`).
-> 4. **Partial Failure Handling**: If enqueuing a job into BullMQ fails after database insertion, the system logs the failure clearly and reports it in the API response under `partialFailures` rather than silently pretending scheduling succeeded.
-
----
-
-## Scheduling Timestamp & Delay Calculation
-
-* **Individual Email `scheduledAt`**:
-  $$\text{scheduledAt}_i = \text{startTime} + (i \times \text{delayMs})$$
-  *(where $i = 0, 1, 2, \dots$ is the recipient index in the batch).*
-* **BullMQ Relative Delay**:
-  $$\text{delay} = \max(0, \text{scheduledAt}_i - \text{currentTime})$$
-
----
-
-## Idempotency Implementation
-
-Idempotency is enforced using a deterministic SHA-256 hash stored in `Email.idempotencyKey` `@unique`:
-
-$$\text{Canonical String} = \text{senderId} \mid \text{normalizedRecipient} \mid \text{trimmedSubject} \mid \text{trimmedBody} \mid \text{ISO8601ScheduledAt}$$
-
-$$\text{IdempotencyKey} = \text{SHA256}(\text{Canonical String})$$
-
-* **Duplicate Batch Behavior**: Submitting duplicate batch requests skips duplicate recipient emails (`alreadyExistsCount`), preventing duplicate database rows or BullMQ jobs.
-* **Database `@unique` Guard**: The database unique constraint acts as the final authoritative guard against concurrent race conditions.
-
----
-
-## Email State Machine & Worker Execution
-
-```
-[ SCHEDULED ] ─────(Worker Claims Job)─────► [ PROCESSING ] ─────(Simulated Delivery)─────► [ SENT ]
-                                                   │
-                                            (Fatal Error)
-                                                   ▼
-                                              [ FAILED ]
-```
-
-* **Attempts Counter**: Incremented **exactly once** when the worker atomically transitions an Email row from `SCHEDULED` to `PROCESSING`.
-* **Idempotency Safeguard**: If a worker receives a job for an Email that is already marked `SENT`, it logs an idempotency notice and skips execution safely without re-sending.
+> 1. **PostgreSQL Is Authoritative State**: `Email.status` tracks execution status.
+> 2. **Post-Send State Window**: If the SMTP server accepts the message (`250 Accepted`) but updating PostgreSQL to `SENT` fails, a duplicate send could theoretically occur on retry.
+> 3. **Idempotency Safeguard**: Before invoking Nodemailer, the worker checks `if (emailRecord.status === EmailStatus.SENT)`. If already `SENT`, it skips the SMTP send cleanly.
 
 ---
 
 ## Development Seed Script
 
-To seed a test `User` and `Sender` in Docker PostgreSQL for development API testing:
+To seed development test records in Docker PostgreSQL:
 
 ```bash
 npm run db:seed
 ```
 
-* **Created Test Records**:
+* **Seeded Records**:
   * **User ID**: `46130fb6-0aa8-4bbb-88d9-a8d013c8a002` (`dev@example.com`)
-  * **Sender ID**: `0f0d686e-83ae-483e-8695-68a14234282b` (`sender@example.com`)
+  * **Sender A ID**: `23f65fec-0e66-4496-ba40-600ac1053df1` (`senderA@example.com`)
+  * **Sender B ID**: `e09936ed-e165-44c3-82c4-b50738c9fab9` (`senderB@example.com`)
+  * **Invalid Sender ID**: `62be7557-8125-4c5c-9067-bbcbe67716c6` (`invalid_smtp@example.com`)
 
 ---
 
@@ -189,103 +188,32 @@ npm run db:seed
 * **Request Body**:
   ```json
   {
-    "senderId": "0f0d686e-83ae-483e-8695-68a14234282b",
-    "subject": "Weekly Newsletter",
+    "senderId": "23f65fec-0e66-4496-ba40-600ac1053df1",
+    "subject": "Weekly Update",
     "body": "Hello from ReachInbox email scheduler!",
     "startTime": "2026-08-18T10:00:00.000Z",
     "delayMs": 2000,
-    "recipients": [
-      "alice@example.com",
-      "bob@example.com"
-    ]
-  }
-  ```
-* **Success Response (HTTP 200)**:
-  ```json
-  {
-    "message": "Email batch scheduling completed",
-    "summary": {
-      "totalRequested": 2,
-      "scheduledCount": 2,
-      "alreadyExistsCount": 0,
-      "invalidRecipientsCount": 0,
-      "failedEnqueueCount": 0
-    },
-    "scheduledEmails": [
-      {
-        "id": "b041842c-5a56-41b7-97ef-fdd194b61680",
-        "recipient": "alice@example.com",
-        "scheduledAt": "2026-08-18T10:00:00.000Z",
-        "status": "SCHEDULED"
-      },
-      {
-        "id": "f817ba5a-0488-465c-8ace-c007cf30cd87",
-        "recipient": "bob@example.com",
-        "scheduledAt": "2026-08-18T10:00:02.000Z",
-        "status": "SCHEDULED"
-      }
-    ],
-    "skippedDuplicates": [],
-    "invalidRecipients": [],
-    "partialFailures": []
+    "recipients": ["alice@example.com"]
   }
   ```
 
 ### 2. List Scheduled Emails
 * **Method**: `GET /api/emails/scheduled`
-* **Response (HTTP 200)**:
-  ```json
-  {
-    "count": 1,
-    "emails": [
-      {
-        "id": "6c195d49-647c-4246-9c37-b533cfeb0add",
-        "senderId": "0f0d686e-83ae-483e-8695-68a14234282b",
-        "recipient": "dup@example.com",
-        "subject": "Test G Duplicate",
-        "status": "SCHEDULED",
-        "scheduledAt": "2026-08-18T10:00:00.000Z",
-        "attempts": 0,
-        "bullJobId": "6c195d49-647c-4246-9c37-b533cfeb0add",
-        "createdAt": "2026-08-18T09:48:38.671Z"
-      }
-    ]
-  }
-  ```
 
 ### 3. List Sent Emails
 * **Method**: `GET /api/emails/sent`
-* **Response (HTTP 200)**:
-  ```json
-  {
-    "count": 1,
-    "emails": [
-      {
-        "id": "f6609ba2-607b-46e8-8364-d41b38488017",
-        "senderId": "0f0d686e-83ae-483e-8695-68a14234282b",
-        "recipient": "full_stack@example.com",
-        "subject": "Test F Full Stack Restart",
-        "status": "SENT",
-        "scheduledAt": "2026-08-18T09:48:27.679Z",
-        "sentAt": "2026-08-18T09:48:27.803Z",
-        "attempts": 1,
-        "createdAt": "2026-08-18T09:48:07.753Z"
-      }
-    ]
-  }
-  ```
 
 ---
 
 ## Current Implementation Status
 
-**Status: Step 2 (Real Email Scheduling Pipeline) Complete**
+**Status: Step 3 (Ethereal SMTP Integration & Retry Correctness) Complete**
 
 * [x] Step 0: Project repository structure & Docker architecture set up
 * [x] Step 1A: PostgreSQL + Prisma database schema (`User`, `Sender`, `Email`, `EmailStatus`) implemented
 * [x] Step 1B: BullMQ queue (`5.21.2`) & worker process foundation running in Docker
-* [x] Step 2: Email scheduling pipeline (`POST /api/emails/schedule`, `GET /api/emails/scheduled`, `GET /api/emails/sent`), SHA-256 idempotency, state machine transitions, atomic attempts counter, simulated worker sending, and dev seed script.
-* [ ] Step 3: Ethereal SMTP mailer integration & real email sending *(Future step)*
+* [x] Step 2: Email scheduling pipeline, SHA-256 idempotency, state machine transitions, atomic attempts counter.
+* [x] Step 3: Real Ethereal SMTP delivery via Nodemailer (`6.9.16`), sender-specific credentials, Ethereal preview URLs, explicit retry attempt calculation, and secret-leak verification.
 * [ ] Step 4: Rate limiting & minimum delay controls *(Future step)*
 * [ ] Step 5: Google OAuth & authentication *(Future step)*
 * [ ] Step 6: Dashboard UI & Figma design implementation *(Future step)*

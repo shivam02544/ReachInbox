@@ -16,11 +16,13 @@
   },
   "dependencies": {
     "@prisma/client": "5.22.0",
+    "@types/nodemailer": "^6.4.17",
     "bullmq": "5.21.2",
     "cors": "2.8.5",
     "dotenv": "16.4.5",
     "express": "4.21.1",
-    "ioredis": "5.4.1"
+    "ioredis": "5.4.1",
+    "nodemailer": "^6.9.16"
   },
   "devDependencies": {
     "@types/cors": "2.8.17",

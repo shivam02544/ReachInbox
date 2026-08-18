@@ -1,4 +1,4 @@
-export type LogContext = 'API' | 'Worker' | 'Database' | 'Redis' | 'App';
+export type LogContext = 'API' | 'Worker' | 'Database' | 'Redis' | 'App' | 'SMTP';
 
 export const logger = {
   info: (context: LogContext, message: string, meta?: any) => {

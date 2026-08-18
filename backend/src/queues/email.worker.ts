@@ -3,6 +3,7 @@ import { EmailStatus } from '@prisma/client';
 import { config } from '../config/env';
 import { prisma } from '../config/prisma';
 import { EMAIL_QUEUE_NAME, SEND_EMAIL_JOB_NAME, bullRedisConnectionOptions, EmailJobPayload } from './email.queue';
+import { sendMailWithSender } from '../services/mail.service';
 import { logger } from '../utils/logger';
 
 export let emailWorker: Worker<EmailJobPayload, void> | null = null;
@@ -22,7 +23,6 @@ export function initializeEmailWorker(): Worker<EmailJobPayload, void> {
     async (job: Job<EmailJobPayload, void>) => {
       const startTime = Date.now();
 
-      // Only handle send-email jobs
       if (job.name !== SEND_EMAIL_JOB_NAME) {
         logger.warn('Worker', `Ignoring unrecognized job name '${job.name}' (Job ID: ${job.id})`);
         return;
@@ -34,10 +34,17 @@ export function initializeEmailWorker(): Worker<EmailJobPayload, void> {
         throw new Error(`Job missing required emailId`);
       }
 
-      logger.info('Worker', '==================================================');
-      logger.info('Worker', `[Job Claimed] BullMQ Job ID: ${job.id} | Email ID: ${emailId}`);
+      const currentAttempt = job.attemptsMade + 1;
+      const maxAttempts = job.opts.attempts ?? 1;
+      const isFinalAttempt = currentAttempt >= maxAttempts;
 
-      // 1. Fetch authoritative Email record from PostgreSQL
+      logger.info('Worker', '==================================================');
+      logger.info(
+        'Worker',
+        `[Job Claimed] BullMQ Job ID: ${job.id} | Email ID: ${emailId} | Attempt ${currentAttempt}/${maxAttempts}`
+      );
+
+      // 1. Fetch Email and Sender from PostgreSQL
       const emailRecord = await prisma.email.findUnique({
         where: { id: emailId },
         include: { sender: true },
@@ -48,17 +55,22 @@ export function initializeEmailWorker(): Worker<EmailJobPayload, void> {
         throw new Error(`Email record not found in database: ${emailId}`);
       }
 
-      // 2. Idempotency Safeguard: Skip if already SENT
+      if (!emailRecord.sender) {
+        logger.error('Worker', `[Job Error] Sender record missing for Email ID: ${emailId}`);
+        throw new Error(`Sender record missing for Email ID: ${emailId}`);
+      }
+
+      // 2. Already-SENT Idempotency Guard (immediately before send)
       if (emailRecord.status === EmailStatus.SENT) {
         logger.info(
           'Worker',
-          `[Idempotency Safeguard] Email ID ${emailId} is already SENT. Skipping processing safely.`
+          `[Idempotency Guard] Email ID ${emailId} is already SENT in PostgreSQL. Skipping SMTP send safely.`
         );
         logger.info('Worker', '==================================================');
         return;
       }
 
-      // 3. Atomic State Transition: SCHEDULED -> PROCESSING (Increment attempts ONCE)
+      // 3. Atomic State Transition: SCHEDULED -> PROCESSING (Increment attempts ONCE per SMTP attempt)
       const updateResult = await prisma.email.updateMany({
         where: {
           id: emailId,
@@ -71,12 +83,11 @@ export function initializeEmailWorker(): Worker<EmailJobPayload, void> {
       });
 
       if (updateResult.count === 0) {
-        // Reload record to check current state
         const currentRecord = await prisma.email.findUnique({ where: { id: emailId } });
         if (currentRecord?.status === EmailStatus.SENT) {
           logger.info(
             'Worker',
-            `[Idempotency Safeguard] Email ID ${emailId} was marked SENT by another worker. Skipping cleanly.`
+            `[Idempotency Guard] Email ID ${emailId} was marked SENT by another worker process. Skipping cleanly.`
           );
           return;
         }
@@ -91,17 +102,14 @@ export function initializeEmailWorker(): Worker<EmailJobPayload, void> {
 
       logger.info(
         'Worker',
-        `[Processing Email] ID: ${emailId} | Recipient: ${emailRecord.recipient} | ScheduledAt: ${emailRecord.scheduledAt.toISOString()}`
+        `[SMTP Sending] Attempting delivery for Email ID ${emailId} via Sender '${emailRecord.sender.email}' to '${emailRecord.recipient}'...`
       );
 
       try {
-        // 4. Simulated Email Delivery (NO real SMTP / Ethereal sending in Step 2)
-        logger.info(
-          'Worker',
-          `[Simulated Send] Delivering email to ${emailRecord.recipient} (Subject: "${emailRecord.subject}")...`
-        );
+        // 4. Real Nodemailer Ethereal SMTP Delivery
+        const sendResult = await sendMailWithSender(emailRecord.sender, emailRecord);
 
-        // 5. State Transition: PROCESSING -> SENT
+        // 5. Update PostgreSQL state to SENT
         const sentAt = new Date();
         await prisma.email.update({
           where: { id: emailId },
@@ -114,26 +122,52 @@ export function initializeEmailWorker(): Worker<EmailJobPayload, void> {
         const durationMs = Date.now() - startTime;
         logger.info(
           'Worker',
-          `[Simulated Send Success] Email ID ${emailId} (Recipient: ${emailRecord.recipient}) transitioned to SENT state in ${durationMs}ms.`
+          `[SMTP Delivery Success] Email ID ${emailId} sent successfully via SMTP in ${durationMs}ms (MessageId: ${sendResult.messageId}).`
         );
+        if (sendResult.previewUrl) {
+          logger.info('Worker', `[Ethereal Preview URL] ${sendResult.previewUrl}`);
+        }
         logger.info('Worker', '==================================================');
       } catch (err: any) {
+        const safeErrorMessage = err instanceof Error ? err.message : String(err);
         logger.error(
           'Worker',
-          `[Processing Failed] Error sending Email ID ${emailId}: ${err.message}`,
-          err
+          `[SMTP Delivery Failed] Email ID ${emailId} (Attempt ${currentAttempt}/${maxAttempts}) failed: ${safeErrorMessage}`
         );
 
-        // Update database record to FAILED state
-        await prisma.email.update({
-          where: { id: emailId },
-          data: {
-            status: EmailStatus.FAILED,
-            errorMessage: err instanceof Error ? err.message : String(err),
-          },
-        });
+        if (!isFinalAttempt) {
+          // Retryable SMTP failure: Reset status to SCHEDULED so PostgreSQL state remains retryable.
+          // Note: Original scheduledAt is preserved without alteration!
+          await prisma.email.update({
+            where: { id: emailId },
+            data: {
+              status: EmailStatus.SCHEDULED,
+              errorMessage: `Attempt ${currentAttempt}/${maxAttempts} failed: ${safeErrorMessage}`,
+            },
+          });
 
-        throw err; // Re-throw to inform BullMQ of job failure
+          logger.warn(
+            'Worker',
+            `[Retry Scheduled] Email ID ${emailId} reset to SCHEDULED state. Re-throwing error for BullMQ exponential backoff.`
+          );
+          logger.info('Worker', '==================================================');
+          throw err; // Re-throw error so BullMQ schedules exponential retry
+        } else {
+          // Final attempt exhausted: Transition permanently to FAILED state
+          await prisma.email.update({
+            where: { id: emailId },
+            data: {
+              status: EmailStatus.FAILED,
+              errorMessage: `Final attempt ${currentAttempt}/${maxAttempts} failed: ${safeErrorMessage}`,
+            },
+          });
+
+          logger.error(
+            'Worker',
+            `[Retries Exhausted] Email ID ${emailId} permanently transitioned to FAILED state.`
+          );
+          logger.info('Worker', '==================================================');
+        }
       }
     },
     {
@@ -151,7 +185,7 @@ export function initializeEmailWorker(): Worker<EmailJobPayload, void> {
   });
 
   emailWorker.on('failed', (job, err) => {
-    logger.error('Worker', `BullMQ Job [ID: ${job?.id}] FAILED: ${err.message}`);
+    logger.error('Worker', `BullMQ Job [ID: ${job?.id}] marked as FAILED: ${err.message}`);
   });
 
   emailWorker.on('error', (err) => {
