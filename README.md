@@ -76,6 +76,27 @@ Ethereal SMTP Mailer (smtp.ethereal.email:587)
 
 ---
 
+## CSV Bulk Email Scheduling (Step 6)
+
+1. **Multer 2.2.0 Memory Storage & CSV Parser**:
+   - Pinned exact versions `"multer": "2.2.0"` (secure 2.x release) and `"csv-parse": "5.6.0"`.
+   - `multer.memoryStorage()` buffers file in RAM (`req.file.buffer`) with hard 5 MB limit (`MAX_CSV_FILE_SIZE_MB=5`). Zero temporary disk files created.
+   - Case-insensitive `email` header search and structural CSV parsing (`csv-parse/sync` with UTF-8 BOM, cell trimming, and unclosed quote error handling).
+
+2. **Parsing & Preview Endpoint (`POST /api/emails/parse-csv`)**:
+   - Protected by `requireAuth` middleware.
+   - Returns structured preview JSON with numerical metrics (`totalRows`, `validRecipientsCount`, `invalidRecipientsCount`, `duplicateRecipientsCount`) and categorized email arrays before scheduling.
+
+3. **User Senders Dropdown Endpoint (`GET /api/senders`)**:
+   - Protected by `requireAuth`.
+   - Queries `prisma.sender.findMany({ where: { userId: req.user.id } })` to populate dropdown options while strictly omitting SMTP passwords.
+
+4. **Dashboard Bulk Campaign UI**:
+   - Next.js App Router components (`CsvUploader`, `CsvPreview`, `BulkScheduleForm`).
+   - Renders valid/invalid/duplicate recipient statistics and displays authoritative backend scheduling summaries.
+
+---
+
 ## Authentication & Multi-User Data Isolation (Step 5)
 
 1. **Express Backend Authoritative Auth Layer**:
@@ -132,7 +153,7 @@ npm run db:seed
 
 ## Current Implementation Status
 
-**Status: Step 5 (Real Google OAuth + Authentication Foundation) Complete**
+**Status: Step 6 (CSV Upload + Bulk Email Scheduling) Complete**
 
 * [x] Step 0: Docker architecture set up
 * [x] Step 1A: PostgreSQL + Prisma schema (`User`, `Sender`, `Email`, `EmailStatus`) implemented
@@ -141,4 +162,4 @@ npm run db:seed
 * [x] Step 3: Real Ethereal SMTP delivery via Nodemailer (`6.9.16`), sender-specific credentials, preview URLs.
 * [x] Step 4: Distributed Redis Lua Rate Limiting, Minimum Inter-Send Delay, Authoritative Token Rollback, and BullMQ `DelayedError` rescheduling.
 * [x] Step 5: Real Google OAuth 2.0, Redis-backed Session Storage, Express `requireAuth` Middleware, Multi-User Data Isolation, Next.js `/login` & `/dashboard` Auth Foundation.
-* [ ] Step 6: CSV Upload, Compose Email Modal, Figma Dashboard UI, Scheduled/Sent Tables *(Future step)*
+* [x] Step 6: Memory-buffered Multer 2.2.0 & csv-parse 5.6.0 CSV Upload, Structural Header Validation, Recipient Sanitization & Preview, Campaign Setup UI, and Bulk Email Scheduling Pipeline.
