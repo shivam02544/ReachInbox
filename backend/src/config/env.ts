@@ -12,6 +12,7 @@ export interface AppConfig {
   databaseUrl: string;
   redisHost: string;
   redisPort: number;
+  workerConcurrency: number;
   frontendUrl: string;
 }
 
@@ -30,6 +31,7 @@ export const config: AppConfig = {
   databaseUrl: getEnv('DATABASE_URL', 'postgresql://reachinbox_user:reachinbox_pass@postgres:5432/reachinbox_db?schema=public'),
   redisHost: getEnv('REDIS_HOST', 'redis'),
   redisPort: parseInt(process.env.REDIS_PORT || '6379', 10),
+  workerConcurrency: parseInt(process.env.WORKER_CONCURRENCY || '5', 10),
   frontendUrl: process.env.FRONTEND_URL || 'http://localhost:3000',
 };
 
