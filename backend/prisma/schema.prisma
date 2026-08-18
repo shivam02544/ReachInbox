@@ -10,8 +10,73 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// System initialization model for Prisma setup & dependency health check
-model SystemInit {
+// Lifecycle states of an email job
+enum EmailStatus {
+  SCHEDULED
+  PROCESSING
+  SENT
+  FAILED
+}
+
+// Google-authenticated application user
+model User {
   id        String   @id @default(uuid())
+  googleId  String   @unique
+  email     String   @unique
+  name      String
+  avatarUrl String?
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  senders Sender[]
+  emails  Email[]
+}
+
+// Email identity / SMTP credentials associated with a user
+model Sender {
+  id           String   @id @default(uuid())
+  userId       String
+  email        String
+  displayName  String
+  smtpHost     String
+  smtpPort     Int
+  smtpUser     String
+  smtpPassword String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  emails Email[]
+
+  @@index([userId])
+  @@index([email])
+}
+
+// Individual scheduled or sent recipient email record (1 row = 1 recipient)
+model Email {
+  id             String      @id @default(uuid())
+  userId         String
+  senderId       String
+  recipient      String
+  subject        String
+  body           String      @db.Text
+  status         EmailStatus @default(SCHEDULED)
+  scheduledAt    DateTime
+  sentAt         DateTime?
+  attempts       Int         @default(0)
+  bullJobId      String?
+  idempotencyKey String      @unique
+  errorMessage   String?     @db.Text
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sender Sender @relation(fields: [senderId], references: [id], onDelete: Restrict)
+
+  @@index([userId])
+  @@index([senderId])
+  @@index([status])
+  @@index([scheduledAt])
+  @@index([bullJobId])
+  @@index([status, scheduledAt])
 }
