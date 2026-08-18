@@ -24,6 +24,15 @@ export interface AppConfig {
     pass: string;
     secure: boolean;
   };
+  google: {
+    clientId: string;
+    clientSecret: string;
+    callbackUrl: string;
+  };
+  session: {
+    ttlSeconds: number;
+    secret: string;
+  };
 }
 
 const getEnv = (key: string, defaultValue?: string): string => {
@@ -52,6 +61,15 @@ export const config: AppConfig = {
     user: process.env.ETHEREAL_USER || 'x6wf6elp3ert62r3@ethereal.email',
     pass: process.env.ETHEREAL_PASSWORD || 'jREstXBKhb1Rjw1txP',
     secure: process.env.ETHEREAL_SECURE === 'true',
+  },
+  google: {
+    clientId: process.env.GOOGLE_CLIENT_ID || 'google_client_id_placeholder',
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET || 'google_client_secret_placeholder',
+    callbackUrl: process.env.GOOGLE_CALLBACK_URL || 'http://localhost:5000/api/auth/google/callback',
+  },
+  session: {
+    ttlSeconds: parseInt(process.env.SESSION_TTL_SECONDS || '86400', 10),
+    secret: process.env.SESSION_SECRET || 'reachinbox_dev_session_secret_change_in_prod',
   },
 };
 

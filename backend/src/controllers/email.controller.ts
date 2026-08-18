@@ -3,7 +3,8 @@ import { scheduleEmailsBatch, getScheduledEmails, getSentEmails, CustomServiceEr
 
 export async function scheduleEmailsController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const result = await scheduleEmailsBatch(req.body);
+    const userId = req.user!.id;
+    const result = await scheduleEmailsBatch(req.body, userId);
     res.status(200).json(result);
   } catch (error) {
     if (error instanceof CustomServiceError) {
@@ -21,7 +22,8 @@ export async function scheduleEmailsController(req: Request, res: Response, next
 
 export async function getScheduledEmailsController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const emails = await getScheduledEmails();
+    const userId = req.user!.id;
+    const emails = await getScheduledEmails(userId);
     res.status(200).json({
       count: emails.length,
       emails,
@@ -33,7 +35,8 @@ export async function getScheduledEmailsController(req: Request, res: Response, 
 
 export async function getSentEmailsController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const emails = await getSentEmails();
+    const userId = req.user!.id;
+    const emails = await getSentEmails(userId);
     res.status(200).json({
       count: emails.length,
       emails,

@@ -45,20 +45,20 @@ export class CustomServiceError extends Error {
   }
 }
 
-export async function scheduleEmailsBatch(dto: ScheduleEmailsDTO): Promise<ScheduleBatchResult> {
+export async function scheduleEmailsBatch(dto: ScheduleEmailsDTO, userId: string): Promise<ScheduleBatchResult> {
   const { senderId, subject, body, startTime, delayMs, recipients } = dto;
 
-  // 1. Sender Validation
+  // 1. Sender Validation & Ownership Check
   if (!senderId || typeof senderId !== 'string') {
     throw new CustomServiceError('senderId is required and must be a valid string.', 400);
   }
 
-  const sender = await prisma.sender.findUnique({
-    where: { id: senderId },
+  const sender = await prisma.sender.findFirst({
+    where: { id: senderId, userId },
   });
 
   if (!sender) {
-    throw new CustomServiceError(`Sender with ID '${senderId}' not found.`, 404);
+    throw new CustomServiceError(`Forbidden: Sender with ID '${senderId}' not found or does not belong to authenticated user.`, 403);
   }
 
   // 2. Input Field Validations
@@ -138,7 +138,7 @@ export async function scheduleEmailsBatch(dto: ScheduleEmailsDTO): Promise<Sched
       // Create PostgreSQL Email Record (status = SCHEDULED)
       const emailRecord = await prisma.email.create({
         data: {
-          userId: sender.userId,
+          userId,
           senderId,
           recipient,
           subject: subject.trim(),
@@ -191,7 +191,7 @@ export async function scheduleEmailsBatch(dto: ScheduleEmailsDTO): Promise<Sched
 
   logger.info(
     'API',
-    `Schedule batch complete: ${scheduledEmails.length} scheduled, ${skippedDuplicates.length} duplicates skipped, ${partialFailures.length} partial failures.`
+    `Schedule batch complete for User ${userId}: ${scheduledEmails.length} scheduled, ${skippedDuplicates.length} duplicates skipped, ${partialFailures.length} partial failures.`
   );
 
   return {
@@ -210,9 +210,9 @@ export async function scheduleEmailsBatch(dto: ScheduleEmailsDTO): Promise<Sched
   };
 }
 
-export async function getScheduledEmails() {
+export async function getScheduledEmails(userId: string) {
   return prisma.email.findMany({
-    where: { status: EmailStatus.SCHEDULED },
+    where: { userId, status: EmailStatus.SCHEDULED },
     select: {
       id: true,
       senderId: true,
@@ -228,9 +228,9 @@ export async function getScheduledEmails() {
   });
 }
 
-export async function getSentEmails() {
+export async function getSentEmails(userId: string) {
   return prisma.email.findMany({
-    where: { status: EmailStatus.SENT },
+    where: { userId, status: EmailStatus.SENT },
     select: {
       id: true,
       senderId: true,

@@ -76,6 +76,35 @@ Ethereal SMTP Mailer (smtp.ethereal.email:587)
 
 ---
 
+## Authentication & Multi-User Data Isolation (Step 5)
+
+1. **Express Backend Authoritative Auth Layer**:
+   - Google OAuth 2.0 via Passport.js (`passport-google-oauth20`) on Express backend (`GET /api/auth/google`, `GET /api/auth/google/callback`).
+   - CSRF State Protection enabled (`state: true`).
+   - `GOOGLE_CLIENT_SECRET` and `SESSION_SECRET` remain strictly on backend and are never exposed to frontend or logs.
+
+2. **Redis-Backed Server-Side Sessions**:
+   - Sessions stored in Redis under `auth:session:{sessionId}` with configurable TTL (`SESSION_TTL_SECONDS`).
+   - HTTP-only authentication cookie `reachinbox_sid` (`httpOnly: true`, `sameSite: 'lax'`).
+   - Sessions persist across backend restarts and Redis container restarts via named Docker volume `redis_data`.
+
+3. **User Creation & Sender Security**:
+   - Uses existing Prisma `User`, `Sender`, and `Email` models with **zero schema changes**.
+   - Auto-creates default Ethereal senders for new Google OAuth users so they can immediately schedule email campaigns.
+   - Senders strictly belong to `userId`. SMTP passwords are never returned in API responses or logged.
+
+4. **Multi-User Data Isolation**:
+   - Express `requireAuth` middleware verifies `reachinbox_sid` cookie and attaches `req.user`.
+   - `POST /api/emails/schedule`, `GET /api/emails/scheduled`, and `GET /api/emails/sent` require authentication.
+   - Scheduling validates `senderId` belongs to `req.user.id` (returns HTTP 403 Forbidden if violated).
+   - Queries strictly filter `where: { userId: req.user.id }`.
+
+5. **Next.js Auth Foundation**:
+   - `/login` page with Google OAuth button.
+   - `/dashboard` verification page calling `GET /api/auth/me` (`credentials: "include"`), displaying user details and Logout button (`POST /api/auth/logout`).
+
+---
+
 ## Ethereal Email SMTP Setup
 
 1. **Test Account Creation**: Ethereal test accounts generated via Nodemailer.
@@ -103,7 +132,7 @@ npm run db:seed
 
 ## Current Implementation Status
 
-**Status: Step 4 (Distributed Rate Limiting + Minimum Delay + Concurrency Safety) Complete**
+**Status: Step 5 (Real Google OAuth + Authentication Foundation) Complete**
 
 * [x] Step 0: Docker architecture set up
 * [x] Step 1A: PostgreSQL + Prisma schema (`User`, `Sender`, `Email`, `EmailStatus`) implemented
@@ -111,5 +140,5 @@ npm run db:seed
 * [x] Step 2: Email scheduling pipeline, SHA-256 idempotency, state machine transitions.
 * [x] Step 3: Real Ethereal SMTP delivery via Nodemailer (`6.9.16`), sender-specific credentials, preview URLs.
 * [x] Step 4: Distributed Redis Lua Rate Limiting, Minimum Inter-Send Delay, Authoritative Token Rollback, and BullMQ `DelayedError` rescheduling.
-* [ ] Step 5: Google OAuth & authentication *(Future step)*
-* [ ] Step 6: Dashboard UI & Figma design implementation *(Future step)*
+* [x] Step 5: Real Google OAuth 2.0, Redis-backed Session Storage, Express `requireAuth` Middleware, Multi-User Data Isolation, Next.js `/login` & `/dashboard` Auth Foundation.
+* [ ] Step 6: CSV Upload, Compose Email Modal, Figma Dashboard UI, Scheduled/Sent Tables *(Future step)*

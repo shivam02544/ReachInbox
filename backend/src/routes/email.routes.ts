@@ -4,16 +4,17 @@ import {
   getScheduledEmailsController,
   getSentEmailsController,
 } from '../controllers/email.controller';
+import { requireAuth } from '../middleware/auth.middleware';
 
 const router = Router();
 
-// Schedule email batch
-router.post('/schedule', scheduleEmailsController);
+// Schedule email batch (Protected)
+router.post('/schedule', requireAuth, scheduleEmailsController);
 
-// List scheduled emails (status = SCHEDULED)
-router.get('/scheduled', getScheduledEmailsController);
+// List scheduled emails (Protected)
+router.get('/scheduled', requireAuth, getScheduledEmailsController);
 
-// List sent emails (status = SENT)
-router.get('/sent', getSentEmailsController);
+// List sent emails (Protected)
+router.get('/sent', requireAuth, getSentEmailsController);
 
 export default router;
