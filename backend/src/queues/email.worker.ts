@@ -1,9 +1,10 @@
-import { Worker, Job } from 'bullmq';
+import { Worker, Job, DelayedError } from 'bullmq';
 import { EmailStatus } from '@prisma/client';
 import { config } from '../config/env';
 import { prisma } from '../config/prisma';
 import { EMAIL_QUEUE_NAME, SEND_EMAIL_JOB_NAME, bullRedisConnectionOptions, EmailJobPayload } from './email.queue';
 import { sendMailWithSender } from '../services/mail.service';
+import { rateLimitService } from '../services/rateLimit.service';
 import { logger } from '../utils/logger';
 
 export let emailWorker: Worker<EmailJobPayload, void> | null = null;
@@ -70,7 +71,22 @@ export function initializeEmailWorker(): Worker<EmailJobPayload, void> {
         return;
       }
 
-      // 3. Atomic State Transition: SCHEDULED -> PROCESSING (Increment attempts ONCE per SMTP attempt)
+      // 3. Atomic Redis Rate Limit Reservation (Minimum Delay & Hourly Quota)
+      const reservation = await rateLimitService.reserveSendSlot(emailRecord.senderId);
+
+      if (!reservation.allowed) {
+        logger.info(
+          'RateLimit',
+          `[RateLimit Rescheduled] Job ${job.id} (Email ${emailId}) denied reservation (${reservation.reason}). Delaying by ${reservation.rescheduleDelayMs}ms.`
+        );
+        logger.info('Worker', '==================================================');
+
+        // Move job back to BullMQ delayed set in Redis and throw DelayedError
+        await job.moveToDelayed(Date.now() + reservation.rescheduleDelayMs, job.token);
+        throw new DelayedError();
+      }
+
+      // 4. Atomic State Transition: SCHEDULED -> PROCESSING (Increment attempts ONCE per SMTP attempt)
       const updateResult = await prisma.email.updateMany({
         where: {
           id: emailId,
@@ -83,6 +99,13 @@ export function initializeEmailWorker(): Worker<EmailJobPayload, void> {
       });
 
       if (updateResult.count === 0) {
+        // Atomic DB claim failed: Rollback Redis reservation safely via Authoritative Lua Rollback
+        await rateLimitService.releaseReservationSlot(
+          emailRecord.senderId,
+          reservation.reservationToken!,
+          reservation.hourWindow!
+        );
+
         const currentRecord = await prisma.email.findUnique({ where: { id: emailId } });
         if (currentRecord?.status === EmailStatus.SENT) {
           logger.info(
