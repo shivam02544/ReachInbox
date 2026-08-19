@@ -67,45 +67,45 @@ ReachInbox follows a microservices-capable, 5-tier architecture orchestrated via
 
 ```mermaid
 flowchart TD
-    subgraph Client ["Client Tier (Port 3000)"]
-        UI["Next.js 14 Figma Email Client\n(Pure White #FFFFFF Canvas)"]
+    subgraph Client ["Client Tier - Port 3000"]
+        UI["Next.js 14 Figma Email Client - Pure White Canvas"]
     end
 
-    subgraph API ["Application Tier (Port 5000)"]
+    subgraph API ["Application Tier - Port 5000"]
         Express["Express.js Server"]
         AuthMiddleware["requireAuth Middleware"]
         GoogleOAuth["Passport.js Google OAuth 2.0"]
-        CSVParser["Multer + csv-parse Pipeline"]
+        CSVParser["Multer and csv-parse Pipeline"]
     end
 
-    subgraph Storage ["Storage & Queue Tier"]
-        RedisSession[("Redis Server\nSessions & Rate Limits\n(Port 6379)")]
-        PostgresDB[("PostgreSQL 16\nPrisma ORM\n(Port 5433:5432)")]
-        BullQueue["BullMQ Delayed Queue\n'email-queue'"]
+    subgraph Storage ["Storage and Queue Tier"]
+        RedisSession[("Redis Server - Sessions and Rate Limits - Port 6379")]
+        PostgresDB[("PostgreSQL 16 - Prisma ORM - Port 5433:5432")]
+        BullQueue["BullMQ Delayed Queue - email-queue"]
     end
 
     subgraph AsyncWorker ["Asynchronous Worker Tier"]
-        Worker["BullMQ Email Worker Process\n(Concurrency: 5)"]
-        LuaLimiter["Redis Lua Rate Limiter\n(reserveSendSlot / releaseReservationSlot)"]
+        Worker["BullMQ Email Worker Process - Concurrency 5"]
+        LuaLimiter["Redis Lua Rate Limiter - reserveSendSlot / releaseReservationSlot"]
         Mailer["Nodemailer Engine"]
     end
 
     subgraph External ["External Services"]
         GoogleAPI["Google OAuth 2.0 Provider"]
-        EtherealSMTP["Ethereal SMTP Server\n(smtp.ethereal.email:587)"]
+        EtherealSMTP["Ethereal SMTP Server - smtp.ethereal.email:587"]
     end
 
-    UI <-->|HTTP / Credentials| Express
+    UI <-->|HTTP and Credentials| Express
     Express <--> AuthMiddleware
-    AuthMiddleware <-->|Read / Write Sessions| RedisSession
+    AuthMiddleware <-->|Read and Write Sessions| RedisSession
     Express <-->|Authenticate| GoogleAPI
-    Express <-->|CRUD Email / Sender Records| PostgresDB
-    Express -->|Enqueue Jobs (jobId = Email.id)| BullQueue
-    BullQueue <-->|Store Jobs & Delays| RedisSession
+    Express <-->|CRUD Email and Sender Records| PostgresDB
+    Express -->|Enqueue Jobs - jobId equals Email.id| BullQueue
+    BullQueue <-->|Store Jobs and Delays| RedisSession
     Worker <-->|Pop Jobs| BullQueue
-    Worker <-->|Execute Atomic Reserve / Rollback| LuaLimiter
+    Worker <-->|Execute Atomic Reserve or Rollback| LuaLimiter
     LuaLimiter <--> RedisSession
-    Worker <-->|Read Email & Update Status| PostgresDB
+    Worker <-->|Read Email and Update Status| PostgresDB
     Worker -->|Deliver Emails via SMTP| Mailer
     Mailer -->|Send Mail| EtherealSMTP
 ```
@@ -126,56 +126,56 @@ flowchart TD
 ```mermaid
 sequenceDiagram
     autonumber
-    actor User as User / Browser
+    actor User as User or Browser
     participant API as Express API
-    participant DB as PostgreSQL (Prisma)
-    participant Queue as BullMQ (Redis)
+    participant DB as PostgreSQL Prisma
+    participant Queue as BullMQ Redis
     participant Worker as Email Worker
     participant RateLimiter as Redis Lua Limiter
     participant SMTP as Ethereal SMTP
 
-    User->>API: 1-2. Authenticate via Google OAuth / Establish Session
-    User->>API: 3-8. Open Compose & Upload CSV / Select Sender & Recipients
-    API->>API: Parse CSV, Validate RFC 5322 Emails & Filter Duplicates
-    User->>API: 9. Submit Campaign (POST /api/emails/schedule)
+    User->>API: Authenticate via Google OAuth and Establish Session
+    User->>API: Open Compose and Upload CSV or Select Sender and Recipients
+    API->>API: Parse CSV, Validate RFC 5322 Emails and Filter Duplicates
+    User->>API: Submit Campaign to POST api/emails/schedule
     loop For Each Recipient
-        API->>API: 11. Compute SHA-256 Idempotency Key
-        API->>DB: 10-11. Insert Email Record (status = SCHEDULED)
-        alt Duplicate Idempotency Key Exists (P2002)
-            API-->>API: Increment alreadyExistsCount & Skip
+        API->>API: Compute SHA-256 Idempotency Key
+        API->>DB: Insert Email Record with status SCHEDULED
+        alt Duplicate Idempotency Key Exists P2002
+            API-->>API: Increment alreadyExistsCount and Skip
         else New Email Record Created
-            API->>Queue: 12. Enqueue BullMQ Delayed Job (jobId = Email.id)
+            API->>Queue: Enqueue BullMQ Delayed Job with jobId equals Email.id
             API->>DB: Update Email.bullJobId
         end
     end
     API-->>User: Return Schedule Summary Result
 
     Note over Queue, Worker: Time Reaches Scheduled Timestamp
-    Queue->>Worker: 13. Worker Claims Job (emailId)
-    Worker->>DB: Fetch Email & Sender Details
-    Worker->>RateLimiter: 14. Execute reserveSendSlot(senderId)
-    alt Rate Limit Exceeded / Inter-Send Delay Throttled
-        RateLimiter-->>Worker: Allowed = false (rescheduleDelayMs)
-        Worker->>Queue: 15. Move Job to Delayed Set (moveToDelayed) & Throw DelayedError
+    Queue->>Worker: Worker Claims Job with emailId
+    Worker->>DB: Fetch Email and Sender Details
+    Worker->>RateLimiter: Execute reserveSendSlot for senderId
+    alt Rate Limit Exceeded or Inter-Send Delay Throttled
+        RateLimiter-->>Worker: Allowed equals false with rescheduleDelayMs
+        Worker->>Queue: Move Job to Delayed Set via moveToDelayed and Throw DelayedError
         Note over Worker: Status Remains SCHEDULED, Attempts NOT Incremented
     else Rate Limit Slot Granted
-        RateLimiter-->>Worker: Allowed = true (reservationToken)
-        Worker->>DB: 16. Atomic Claim: SCHEDULED -> PROCESSING (attempts + 1)
-        Worker->>SMTP: 16-17. Send Mail via Nodemailer
+        RateLimiter-->>Worker: Allowed equals true with reservationToken
+        Worker->>DB: Atomic Claim SCHEDULED to PROCESSING and Increment Attempts
+        Worker->>SMTP: Send Mail via Nodemailer
         alt SMTP Delivery Success
-            SMTP-->>Worker: 250 Accepted (messageId & previewUrl)
-            Worker->>DB: 18. Update State: PROCESSING -> SENT (sentAt)
-        else SMTP Delivery Failed (Transient)
+            SMTP-->>Worker: 250 Accepted with messageId and previewUrl
+            Worker->>DB: Update State from PROCESSING to SENT with sentAt
+        else SMTP Delivery Failed Transient
             SMTP-->>Worker: Error Response
-            alt Attempts < Max Attempts (3)
-                Worker->>DB: Reset State: PROCESSING -> SCHEDULED
+            alt Attempts Less Than Max Attempts 3
+                Worker->>DB: Reset State from PROCESSING to SCHEDULED
                 Worker-->>Queue: Re-throw Error for BullMQ Exponential Backoff
             else Final Attempt Failed
-                Worker->>DB: 18. Update State: PROCESSING -> FAILED (errorMessage)
+                Worker->>DB: Update State from PROCESSING to FAILED with errorMessage
             end
         end
     end
-    Worker->>User: 19. Dashboard Reflects Updated State (SCHEDULED / SENT / FAILED)
+    Worker->>User: Dashboard Reflects Updated State SCHEDULED or SENT or FAILED
 ```
 
 ---
@@ -186,20 +186,20 @@ The lifecycle of an email in ReachInbox is governed by a strict PostgreSQL state
 
 ```mermaid
 stateDiagram-v2
-    [*] --> SCHEDULED: Campaign Created / Enqueued
+    [*] --> SCHEDULED: Campaign Created or Enqueued
     
     state RateLimitCheck <<choice>>
     SCHEDULED --> RateLimitCheck: Worker Claims Job
     
-    RateLimitCheck --> SCHEDULED: Rate Limited (Rescheduled via DelayedError)\n*Attempts count NOT incremented*
-    RateLimitCheck --> PROCESSING: Slot Reserved (Atomic DB Claim)\n*Attempts count incremented (+1)*
+    RateLimitCheck --> SCHEDULED: Rate Limited and Rescheduled via DelayedError
+    RateLimitCheck --> PROCESSING: Slot Reserved via Atomic DB Claim
     
     state DeliveryCheck <<choice>>
     PROCESSING --> DeliveryCheck: Nodemailer SMTP Dispatch
     
-    DeliveryCheck --> SENT: 250 Accepted Success\n(sentAt timestamp set)
-    DeliveryCheck --> SCHEDULED: Transient Failure (Attempt < 3)\n(Exponential Backoff Retry)
-    DeliveryCheck --> FAILED: Final Attempt Failed (Attempt = 3)\n(errorMessage captured)
+    DeliveryCheck --> SENT: 250 Accepted Success
+    DeliveryCheck --> SCHEDULED: Transient Failure on Attempt 1 or 2
+    DeliveryCheck --> FAILED: Final Attempt 3 Failed
     
     SENT --> [*]
     FAILED --> [*]
