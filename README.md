@@ -1,184 +1,597 @@
 # ReachInbox Email Scheduler
 
-Production-grade full-stack email scheduling application inspired by ReachInbox.
+A high-performance, fault-tolerant, multi-tenant email scheduling and bulk outreach platform built with **Node.js, Express, TypeScript, Next.js, PostgreSQL, Prisma, BullMQ, Redis, and Nodemailer**.
+
+ReachInbox provides delayed email delivery, distributed rate limiting per sender, minimum inter-send delay enforcement, SHA-256 idempotency safeguards, CSV upload parsing with recipient validation, Google OAuth 2.0 authentication, Redis server-side session management, and a clean, Figma-designed email-client interface.
+
+---
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Features](#features)
+- [Architecture](#architecture)
+- [Email Scheduling Flow](#email-scheduling-flow)
+- [Email State Machine](#email-state-machine)
+- [Rate Limiting & Concurrency](#rate-limiting--concurrency)
+- [Idempotency](#idempotency)
+- [Retry System](#retry-system)
+- [Authentication & Security](#authentication--security)
+- [CSV Bulk Scheduling](#csv-bulk-scheduling)
+- [API Reference](#api-reference)
+- [Frontend UI & Figma Alignment](#frontend-ui--figma-alignment)
+- [Environment Variables](#environment-variables)
+- [Docker Infrastructure & Setup](#docker-infrastructure--setup)
+- [Development & Verification](#development--verification)
+
+---
+
+## Overview
+
+### What is ReachInbox Email Scheduler?
+ReachInbox Email Scheduler is an enterprise-grade platform designed to solve the complexities of automated cold email outreach, delayed notification dispatching, and rate-regulated transactional emailing.
+
+### The Problem It Solves
+1. **Sender Reputation Protection**: High-volume burst sending causes email service providers (Gmail, Outlook) to block sender domains or mark emails as spam. ReachInbox regulates dispatch rates via distributed Redis Lua rate limiters that enforce minimum inter-send delays (e.g., 2000ms between consecutive emails) and hourly sender quotas (e.g., 100 emails/hour/sender).
+2. **At-Least-Once Delivery & Idempotency**: In distributed scheduling, duplicate network submissions or queue re-deliveries can cause duplicate emails to be sent to recipients. ReachInbox canonicalizes every email request into a deterministic SHA-256 idempotency key backed by PostgreSQL unique constraints.
+3. **Multi-Tenant Isolation**: Built with Google OAuth 2.0 and Redis-backed session storage (`auth:session:{sessionId}`), ReachInbox ensures complete data isolation where every user accesses only their own senders, scheduled jobs, sent logs, and failure reports.
+4. **CSV Bulk Campaign Parsing**: Uploading large recipient lists requires parsing, header detection, email format validation (RFC 5322), in-file duplicate detection, and payload sanitization before scheduling jobs in BullMQ.
+
+---
+
+## Features
+
+- **Google OAuth 2.0 Authentication**: Seamless authentication using Passport.js with server-side session persistence.
+- **Redis Server-Side Session Storage**: Secure HTTP-only cookies (`reachinbox_sid`) mapping to Redis session keys (`auth:session:{sessionId}`) with configurable TTL (default 24 hours).
+- **Multi-Tenant Data Isolation**: Strict database and API scoping using `req.user.id` on PostgreSQL queries.
+- **PostgreSQL & Prisma ORM**: Relational schema managing `User`, `Sender`, `Email`, and lifecycle `EmailStatus` (`SCHEDULED`, `PROCESSING`, `SENT`, `FAILED`).
+- **BullMQ Delayed Queue Foundation**: Asynchronous Redis-backed job queue for scheduling emails at precise future timestamps (`jobId = Email.id`).
+- **Distributed Redis Lua Rate Limiting**: Atomic slot reservation enforcing minimum inter-send delays (`MIN_EMAIL_DELAY_MS`) and hourly sender limits (`MAX_EMAILS_PER_HOUR_PER_SENDER`).
+- **BullMQ `DelayedError` Rescheduling**: Non-blocking worker behavior that returns rate-limited jobs back to the BullMQ delayed set without incrementing attempt counters.
+- **SHA-256 Idempotency Key Pipeline**: Deterministic hashing of request payloads preventing duplicate scheduling across API retries and concurrent requests.
+- **Sender-Specific SMTP Delivery**: Real Nodemailer Ethereal SMTP delivery configured with per-sender credentials.
+- **Ethereal Preview URL Logging**: Live preview URL generation logged for manual delivery verification.
+- **Exponential Backoff Retries**: 3-attempt automated retries with exponential backoff on transient SMTP failures.
+- **CSV Bulk Email Upload**: Pinned Multer 2.2.0 memory storage buffering with `csv-parse` sync parsing, case-insensitive `email` header detection, UTF-8 BOM handling, cell trimming, and empty line filtering.
+- **CSV Validation & Deduplication**: Real-time identification of valid, invalid, and duplicate recipient email addresses with a hard 5 MB file size limit and 1000 recipient limit per request.
+- **Scheduled & Sent Management**: Real-time filters and tabular views for inspecting pending scheduled jobs, sent delivery logs, and sanitized failure messages.
+- **Dashboard Analytics**: Protected `GET /api/emails/stats` aggregate metrics endpoint (`scheduledCount`, `processingCount`, `sentCount`, `failedCount`, `totalCount`, `sendersCount`).
+- **Figma-Aligned Email-Client Interface**: Clean 1440x900 desktop email-client UI featuring a pure white canvas (`#FFFFFF`), dark OMB brand logo, green accent system (`#22C55E`), narrow sidebar, compact email rows, full composer view, recipient chips, and an anchored Send Later popover.
+- **Dockerized 5-Service Topology**: Docker Compose orchestration for `postgres`, `redis`, `backend`, `worker`, and `frontend` with container health checks.
 
 ---
 
 ## Architecture
 
-The system utilizes a microservice-style containerized architecture orchestrated by Docker Compose:
+ReachInbox follows a microservices-capable, 5-tier architecture orchestrated via Docker Compose:
 
+```mermaid
+flowchart TD
+    subgraph Client ["Client Tier (Port 3000)"]
+        UI["Next.js 14 Figma Email Client\n(Pure White #FFFFFF Canvas)"]
+    end
+
+    subgraph API ["Application Tier (Port 5000)"]
+        Express["Express.js Server"]
+        AuthMiddleware["requireAuth Middleware"]
+        GoogleOAuth["Passport.js Google OAuth 2.0"]
+        CSVParser["Multer + csv-parse Pipeline"]
+    end
+
+    subgraph Storage ["Storage & Queue Tier"]
+        RedisSession[("Redis Server\nSessions & Rate Limits\n(Port 6379)")]
+        PostgresDB[("PostgreSQL 16\nPrisma ORM\n(Port 5433:5432)")]
+        BullQueue["BullMQ Delayed Queue\n'email-queue'"]
+    end
+
+    subgraph AsyncWorker ["Asynchronous Worker Tier"]
+        Worker["BullMQ Email Worker Process\n(Concurrency: 5)"]
+        LuaLimiter["Redis Lua Rate Limiter\n(reserveSendSlot / releaseReservationSlot)"]
+        Mailer["Nodemailer Engine"]
+    end
+
+    subgraph External ["External Services"]
+        GoogleAPI["Google OAuth 2.0 Provider"]
+        EtherealSMTP["Ethereal SMTP Server\n(smtp.ethereal.email:587)"]
+    end
+
+    UI <-->|HTTP / Credentials| Express
+    Express <--> AuthMiddleware
+    AuthMiddleware <-->|Read / Write Sessions| RedisSession
+    Express <-->|Authenticate| GoogleAPI
+    Express <-->|CRUD Email / Sender Records| PostgresDB
+    Express -->|Enqueue Jobs (jobId = Email.id)| BullQueue
+    BullQueue <-->|Store Jobs & Delays| RedisSession
+    Worker <-->|Pop Jobs| BullQueue
+    Worker <-->|Execute Atomic Reserve / Rollback| LuaLimiter
+    LuaLimiter <--> RedisSession
+    Worker <-->|Read Email & Update Status| PostgresDB
+    Worker -->|Deliver Emails via SMTP| Mailer
+    Mailer -->|Send Mail| EtherealSMTP
 ```
-Browser 
-   │
-   ▼ 
-Next.js Frontend (Port 3000)
-   │
-   ▼ 
-Express Backend API (Port 5000) ──► PostgreSQL (Port 5432 / Host 5433)
-   │
-   ├──► Redis (Port 6379)
-   │      ▲
-   │      │
-BullMQ Queue (`email-queue`)
-   │
-   ▼
-Worker Container (Separate Process, Same Codebase)
-   │
-   ├──► Atomic Redis Lua Rate Limiter (rateLimit.service.ts)
-   │      ├── ratelimit:sender:{senderId}:last_slot ("token:nowMs")
-   │      ├── ratelimit:sender:{senderId}:hour:{YYYYMMDDHH} (Count)
-   │      └── ratelimit:sender:{senderId}:reservation:{token} ("token:nowMs:hourWindow")
-   │
-   ▼
-Nodemailer Mail Service (src/services/mail.service.ts)
-   │
-   ▼
-Ethereal SMTP Mailer (smtp.ethereal.email:587)
+
+### Component Responsibilities
+
+1. **Next.js Frontend (`frontend`)**: Serves the Figma-designed desktop email client UI. Communicates with the Express API using credentialed CORS requests (`credentials: 'include'`).
+2. **Express Backend API (`backend`)**: Handles user authentication, session validation, sender querying, CSV parsing, idempotency checking, database record creation, and BullMQ job enqueuing.
+3. **PostgreSQL Database (`postgres`)**: Acts as the authoritative source of truth for user identities, sender credentials, scheduled emails, status state transitions, and idempotency key constraints.
+4. **Redis Cache & Queue Store (`redis`)**: Stores active session metadata (`auth:session:{sessionId}`), BullMQ delayed queue structures, and distributed rate limiting keys (`ratelimit:sender:{id}:last_slot` and `ratelimit:sender:{id}:hour:{window}`).
+5. **BullMQ Email Worker (`worker`)**: Independent, non-blocking worker process running with configurable concurrency (`WORKER_CONCURRENCY`). Claims jobs, executes Redis Lua rate-limiting checks, updates PostgreSQL states, and sends emails via Nodemailer.
+6. **Ethereal SMTP Server**: External mock SMTP service providing instant email receipt validation and loggable preview URLs.
+
+---
+
+## Email Scheduling Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as User / Browser
+    participant API as Express API
+    participant DB as PostgreSQL (Prisma)
+    participant Queue as BullMQ (Redis)
+    participant Worker as Email Worker
+    participant RateLimiter as Redis Lua Limiter
+    participant SMTP as Ethereal SMTP
+
+    User->>API: 1-2. Authenticate via Google OAuth / Establish Session
+    User->>API: 3-8. Open Compose & Upload CSV / Select Sender & Recipients
+    API->>API: Parse CSV, Validate RFC 5322 Emails & Filter Duplicates
+    User->>API: 9. Submit Campaign (POST /api/emails/schedule)
+    loop For Each Recipient
+        API->>API: 11. Compute SHA-256 Idempotency Key
+        API->>DB: 10-11. Insert Email Record (status = SCHEDULED)
+        alt Duplicate Idempotency Key Exists (P2002)
+            API-->>API: Increment alreadyExistsCount & Skip
+        else New Email Record Created
+            API->>Queue: 12. Enqueue BullMQ Delayed Job (jobId = Email.id)
+            API->>DB: Update Email.bullJobId
+        end
+    end
+    API-->>User: Return Schedule Summary Result
+
+    Note over Queue, Worker: Time Reaches Scheduled Timestamp
+    Queue->>Worker: 13. Worker Claims Job (emailId)
+    Worker->>DB: Fetch Email & Sender Details
+    Worker->>RateLimiter: 14. Execute reserveSendSlot(senderId)
+    alt Rate Limit Exceeded / Inter-Send Delay Throttled
+        RateLimiter-->>Worker: Allowed = false (rescheduleDelayMs)
+        Worker->>Queue: 15. Move Job to Delayed Set (moveToDelayed) & Throw DelayedError
+        Note over Worker: Status Remains SCHEDULED, Attempts NOT Incremented
+    else Rate Limit Slot Granted
+        RateLimiter-->>Worker: Allowed = true (reservationToken)
+        Worker->>DB: 16. Atomic Claim: SCHEDULED -> PROCESSING (attempts + 1)
+        Worker->>SMTP: 16-17. Send Mail via Nodemailer
+        alt SMTP Delivery Success
+            SMTP-->>Worker: 250 Accepted (messageId & previewUrl)
+            Worker->>DB: 18. Update State: PROCESSING -> SENT (sentAt)
+        else SMTP Delivery Failed (Transient)
+            SMTP-->>Worker: Error Response
+            alt Attempts < Max Attempts (3)
+                Worker->>DB: Reset State: PROCESSING -> SCHEDULED
+                Worker-->>Queue: Re-throw Error for BullMQ Exponential Backoff
+            else Final Attempt Failed
+                Worker->>DB: 18. Update State: PROCESSING -> FAILED (errorMessage)
+            end
+        end
+    end
+    Worker->>User: 19. Dashboard Reflects Updated State (SCHEDULED / SENT / FAILED)
 ```
 
-* **Process Separation**: Express API (`backend`) handles scheduling requests. Worker container (`worker`) consumes jobs and evaluates rate limits before SMTP delivery.
-* **Docker Service Communication**: All internal container communication uses Docker DNS names (`postgres`, `redis`, `backend`).
+---
+
+## Email State Machine
+
+The lifecycle of an email in ReachInbox is governed by a strict PostgreSQL state machine (`EmailStatus` enum):
+
+```mermaid
+stateDiagram-v2
+    [*] --> SCHEDULED: Campaign Created / Enqueued
+    
+    state RateLimitCheck <<choice>>
+    SCHEDULED --> RateLimitCheck: Worker Claims Job
+    
+    RateLimitCheck --> SCHEDULED: Rate Limited (Rescheduled via DelayedError)\n*Attempts count NOT incremented*
+    RateLimitCheck --> PROCESSING: Slot Reserved (Atomic DB Claim)\n*Attempts count incremented (+1)*
+    
+    state DeliveryCheck <<choice>>
+    PROCESSING --> DeliveryCheck: Nodemailer SMTP Dispatch
+    
+    DeliveryCheck --> SENT: 250 Accepted Success\n(sentAt timestamp set)
+    DeliveryCheck --> SCHEDULED: Transient Failure (Attempt < 3)\n(Exponential Backoff Retry)
+    DeliveryCheck --> FAILED: Final Attempt Failed (Attempt = 3)\n(errorMessage captured)
+    
+    SENT --> [*]
+    FAILED --> [*]
+```
+
+### Rate-Limit Rescheduling vs. SMTP Retry Semantics
+
+| Property | Rate-Limit Delay (`DelayedError`) | SMTP Delivery Retry |
+| :--- | :--- | :--- |
+| **Trigger Cause** | Sender minimum delay (<2000ms) or hourly quota hit | SMTP network timeout, connection drop, 5xx server rejection |
+| **PostgreSQL State** | Remains **`SCHEDULED`** | Reset from `PROCESSING` back to **`SCHEDULED`** |
+| **Attempt Counter** | **NOT incremented** (`attempts` stays unchanged) | **Incremented by 1** (`attempts: { increment: 1 }`) |
+| **BullMQ Mechanism** | `job.moveToDelayed(now + delay, token)` | `throw err` triggers BullMQ exponential backoff |
+| **Log Classification** | `[RateLimit Rescheduled]` | `[Retry Scheduled]` or `[Retries Exhausted]` |
 
 ---
 
-## Technology Stack
+## Rate Limiting & Concurrency
 
-* **Frontend**: Next.js (`14.2.24`), React (`18.3.1`), TypeScript, Tailwind CSS
-* **Backend API**: Node.js (`v20`), Express.js (`4.21.1`), TypeScript
-* **Database & ORM**: PostgreSQL (`16-alpine`), Prisma ORM (`5.22.0`)
-* **Queue & Cache**: BullMQ (`5.21.2`), Redis (`7-alpine`), `ioredis` (`5.4.1`)
-* **Email Delivery**: Nodemailer (`6.9.16`), Ethereal Email SMTP
-* **Rate Limiting**: Distributed Atomic Redis Lua Scripts
-* **Infrastructure**: Docker, Docker Compose
+ReachInbox enforces two strict distributed constraints per sender using atomic Redis Lua scripts (`reserveSendSlot.lua` and `releaseReservationSlot.lua`):
 
----
+1. **Minimum Inter-Send Delay (`MIN_EMAIL_DELAY_MS`)**: Default **2000ms** between consecutive emails for the same sender.
+2. **Hourly Quota (`MAX_EMAILS_PER_HOUR_PER_SENDER`)**: Default **100 emails/hour** per sender.
 
-## Rate Limiting & Delivery Controls
+### Atomic Redis Lua Slot Reservation (`reserveSendSlot`)
 
-1. **Configurable Minimum Inter-Send Delay (`MIN_EMAIL_DELAY_MS`)**:
-   - Environment variable: `MIN_EMAIL_DELAY_MS` (default: `2000` ms).
-   - Enforces a minimum gap between outbound send slots per sender across all concurrent workers.
-2. **Configurable Hourly Rate Limit (`MAX_EMAILS_PER_HOUR_PER_SENDER`)**:
-   - Environment variable: `MAX_EMAILS_PER_HOUR_PER_SENDER` (default: `200` emails/hour).
-   - Enforces a maximum hourly quota of send slots per sender.
-3. **Atomic Lua Reservation**:
-   - Both constraints are evaluated atomically in Redis via `reserveSendSlot.lua`.
-   - Generates a unique UUID `reservationToken` and token marker `ratelimit:sender:{senderId}:reservation:{token}` containing `"token:nowMs:hourWindow"`.
-4. **Authoritative HourWindow & Token Rollback**:
-   - If PostgreSQL atomic DB claim fails after reservation, `releaseReservationSlot.lua` validates token and hourWindow before releasing the hourly quota.
-   - If a subsequent worker has reserved a newer slot, `last_slot` remains untouched while the failed worker's hourly quota is released cleanly.
-5. **Rescheduling via BullMQ `moveToDelayed` + `DelayedError`**:
-   - Rate-limited jobs call `await job.moveToDelayed(now + delay, job.token)` and `throw new DelayedError()`.
-   - `Email.status` remains `SCHEDULED` in PostgreSQL.
-   - `Email.attempts` is **NOT** incremented.
-   - `BullMQ jobId = Email.id` is preserved intact.
+```lua
+-- Keys: 1: last_slot, 2: hour_key, 3: marker_key
+-- Arguments: 1: nowMs, 2: minDelayMs, 3: maxHourlyLimit, 4: nextHourWindowMs, 5: token, 6: hourWindow
 
----
+local lastSlotData = redis.call('GET', KEYS[1])
+local hourlyCount = tonumber(redis.call('GET', KEYS[2]) or '0')
 
-## CSV Bulk Email Scheduling (Step 6)
+-- 1. Enforce Hourly Sender Quota
+if hourlyCount >= maxHourlyLimit then
+    local waitMs = nextHourWindowMs - nowMs
+    if waitMs < 1000 then waitMs = 1000 end
+    return {0, waitMs, 1, ""}
+end
 
-1. **Multer 2.2.0 Memory Storage & CSV Parser**:
-   - Pinned exact versions `"multer": "2.2.0"` (secure 2.x release) and `"csv-parse": "5.6.0"`.
-   - `multer.memoryStorage()` buffers file in RAM (`req.file.buffer`) with hard 5 MB limit (`MAX_CSV_FILE_SIZE_MB=5`). Zero temporary disk files created.
-   - Case-insensitive `email` header search and structural CSV parsing (`csv-parse/sync` with UTF-8 BOM, cell trimming, and unclosed quote error handling).
+-- 2. Enforce Minimum Inter-Send Delay
+local elapsedMs = nowMs - lastSlot
+if lastSlot > 0 and elapsedMs < minDelayMs then
+    local waitMs = minDelayMs - elapsedMs
+    return {0, waitMs, 2, ""}
+end
 
-2. **Parsing & Preview Endpoint (`POST /api/emails/parse-csv`)**:
-   - Protected by `requireAuth` middleware.
-   - Returns structured preview JSON with numerical metrics (`totalRows`, `validRecipientsCount`, `invalidRecipientsCount`, `duplicateRecipientsCount`) and categorized email arrays before scheduling.
+-- 3. Reserve Slot Atomically
+redis.call('SET', KEYS[1], token .. ":" .. tostring(nowMs), 'PX', math.max(minDelayMs * 2, 10000))
+redis.call('INCR', KEYS[2])
+redis.call('SET', KEYS[3], token .. ":" .. tostring(nowMs) .. ":" .. hourWindow, 'EX', 60)
 
-3. **User Senders Dropdown Endpoint (`GET /api/senders`)**:
-   - Protected by `requireAuth`.
-   - Queries `prisma.sender.findMany({ where: { userId: req.user.id } })` to populate dropdown options while strictly omitting SMTP passwords.
+return {1, 0, 0, token}
+```
 
-4. **Dashboard Bulk Campaign UI**:
-   - Next.js App Router components (`CsvUploader`, `CsvPreview`, `BulkScheduleForm`).
-   - Renders valid/invalid/duplicate recipient statistics and displays authoritative backend scheduling summaries.
+### Authoritative Rollback Handling (`releaseReservationSlot`)
+If a worker successfully reserves a Redis slot but fails to claim the email in PostgreSQL (e.g., race condition where another worker claimed it or status changed to `SENT`), the worker executes an authoritative Lua rollback script (`releaseReservationSlot.lua`) that verifies reservation token ownership before decrementing the hourly counter and clearing the slot.
+
+### Distributed Transaction Limitation Disclaimer
+> **Technical Transparency**: In distributed systems without two-phase commit (2PC) or Saga orchestrators across SMTP and relational databases, if Nodemailer successfully sends an email via SMTP (250 OK) but the database connection crashes before `Email.status` is updated to `SENT`, the job may be re-run by BullMQ. ReachInbox mitigates this using pre-send database idempotency guards (`emailRecord.status === EmailStatus.SENT`), but hard cross-network atomic guarantees between third-party SMTP servers and PostgreSQL cannot be guaranteed without distributed transactions.
 
 ---
 
-## Authentication & Multi-User Data Isolation (Step 5)
+## Idempotency
 
-1. **Express Backend Authoritative Auth Layer**:
-   - Google OAuth 2.0 via Passport.js (`passport-google-oauth20`) on Express backend (`GET /api/auth/google`, `GET /api/auth/google/callback`).
-   - CSRF State Protection enabled (`state: true`).
-   - `GOOGLE_CLIENT_SECRET` and `SESSION_SECRET` remain strictly on backend and are never exposed to frontend or logs.
+ReachInbox canonicalizes every scheduling request into a deterministic SHA-256 hash stored in `Email.idempotencyKey`:
 
-2. **Redis-Backed Server-Side Sessions**:
-   - Sessions stored in Redis under `auth:session:{sessionId}` with configurable TTL (`SESSION_TTL_SECONDS`).
-   - HTTP-only authentication cookie `reachinbox_sid` (`httpOnly: true`, `sameSite: 'lax'`).
-   - Sessions persist across backend restarts and Redis container restarts via named Docker volume `redis_data`.
+### Canonical String Format
+```text
+senderId|normalizedRecipient|trimmedSubject|trimmedBody|ISO8601ScheduledAt
+```
 
-3. **User Creation & Sender Security**:
-   - Uses existing Prisma `User`, `Sender`, and `Email` models with **zero schema changes**.
-   - Auto-creates default Ethereal senders for new Google OAuth users so they can immediately schedule email campaigns.
-   - Senders strictly belong to `userId`. SMTP passwords are never returned in API responses or logged.
+### Hash Generation Implementation
+```typescript
+export function generateIdempotencyKey(
+  senderId: string,
+  recipient: string,
+  subject: string,
+  body: string,
+  scheduledAt: Date
+): string {
+  const normalizedRecipient = recipient.trim().toLowerCase();
+  const normalizedSubject = subject.trim();
+  const normalizedBody = body.trim();
+  const normalizedScheduledAt = scheduledAt.toISOString();
 
-4. **Multi-User Data Isolation**:
-   - Express `requireAuth` middleware verifies `reachinbox_sid` cookie and attaches `req.user`.
-   - `POST /api/emails/schedule`, `GET /api/emails/scheduled`, and `GET /api/emails/sent` require authentication.
-   - Scheduling validates `senderId` belongs to `req.user.id` (returns HTTP 403 Forbidden if violated).
-   - Queries strictly filter `where: { userId: req.user.id }`.
+  const rawKeyString = `${senderId}|${normalizedRecipient}|${normalizedSubject}|${normalizedBody}|${normalizedScheduledAt}`;
+  return crypto.createHash('sha256').update(rawKeyString, 'utf8').digest('hex');
+}
+```
 
-5. **Next.js Auth Foundation**:
-   - `/login` page with Google OAuth button.
-   - `/dashboard` verification page calling `GET /api/auth/me` (`credentials: "include"`), displaying user details and Logout button (`POST /api/auth/logout`).
-
-## Dashboard Analytics & Campaign Management (Step 7)
-
-1. **Live-on-Refresh Analytics Endpoint (`GET /api/emails/stats`)**:
-   - Protected by `requireAuth` middleware.
-   - Executes efficient Prisma database `groupBy` and `count` queries strictly scoped to `where: { userId: req.user.id }`.
-   - Returns `{ scheduledCount, processingCount, sentCount, failedCount, totalCount, sendersCount }`.
-
-2. **Option A API Contracts**:
-   - `GET /api/emails/scheduled`: Returns `status = SCHEDULED` emails for authenticated user.
-   - `GET /api/emails/sent`: Returns `status = SENT` emails for authenticated user (preserves existing API contract 100%).
-   - `GET /api/emails/failed`: Returns `status = FAILED` emails for authenticated user.
-
-3. **Dashboard Management UI & Tabbed Navigation**:
-   - **Analytics Cards** (`AnalyticsCards.tsx`): Displays current live-on-refresh metrics cards (**Scheduled**, **Processing**, **Sent**, **Failed**, **Total Emails**, **Active Senders**) and manual **Refresh Analytics** button.
-   - **Scheduled Emails Table** (`ScheduledTable.tsx`): User-focused table of pending emails with search filter and status badges.
-   - **Sent & Failed History Table** (`SentTable.tsx`): Historical delivery table with Sent/Failed status filter tabs and search filter.
-   - **Quick Single Compose Modal** (`QuickComposeModal.tsx`): Modal allowing quick scheduling of a single email directly from dashboard via `POST /api/emails/schedule`.
+### Database Race-Condition Safeguard
+PostgreSQL enforces a `@unique` index on `Email.idempotencyKey`. If concurrent API requests attempt to schedule the same email payload, Prisma throws a `P2002` unique constraint violation. ReachInbox catches `P2002` cleanly, increments `skippedDuplicates`, and returns a structured response (`alreadyExistsCount`) without crashing the request.
 
 ---
 
-## Ethereal Email SMTP Setup
+## Retry System
 
-1. **Test Account Creation**: Ethereal test accounts generated via Nodemailer.
-2. **Environment Variables** (`.env`):
-   ```ini
-   ETHEREAL_HOST=smtp.ethereal.email
-   ETHEREAL_PORT=587
-   ETHEREAL_USER=x6wf6elp3ert62r3@ethereal.email
-   ETHEREAL_PASSWORD=jREstXBKhb1Rjw1txP
-   ETHEREAL_SECURE=false
+ReachInbox combines BullMQ job retries with PostgreSQL state updates to deliver resilient error handling:
+
+1. **Max Attempts**: Configured for **3 attempts** per job.
+2. **Backoff Strategy**: Exponential backoff starting at **1000ms** (`delay: 1000`, `type: 'exponential'`).
+3. **Atomic Attempt Increment**: Executed in PostgreSQL when transitioning from `SCHEDULED` to `PROCESSING`:
+   ```typescript
+   await prisma.email.updateMany({
+     where: { id: emailId, status: EmailStatus.SCHEDULED },
+     data: { status: EmailStatus.PROCESSING, attempts: { increment: 1 } }
+   });
    ```
-3. **Ethereal Preview URLs**: Logged in worker output: `[Ethereal Preview URL] https://ethereal.email/message/...`
+4. **Retryable vs. Permanent Failure**:
+   - On transient SMTP failure (Attempts 1–2): Status is reset to `SCHEDULED`, error message logged, and exception re-thrown for BullMQ backoff.
+   - On final failure (Attempt 3): Status transitions permanently to `FAILED` with sanitized error string recorded in `Email.errorMessage`.
 
 ---
 
-## Development Seed Script
+## Authentication & Security
 
-To seed development test records in Docker PostgreSQL:
+### Google OAuth 2.0
+Authenticated using Passport.js (`passport-google-oauth20`):
+- Initiated via `GET /api/auth/google`.
+- Callback handled at `GET /api/auth/google/callback`.
+- Creates or updates PostgreSQL `User` record (`googleId`, `email`, `name`, `avatarUrl`).
+
+### Session Architecture
+- **Session Keys**: Stored in Redis as `auth:session:{sessionId}` with a 24-hour TTL (`SESSION_TTL_SECONDS = 86400`).
+- **HTTP-Only Cookie**: `reachinbox_sid` containing the session UUID.
+- **Cookie Security**: Configured with `httpOnly: true`, `sameSite: 'lax'`, and `path: '/'`.
+
+### Multi-Tenant Data Isolation
+The Express `requireAuth` middleware verifies `reachinbox_sid`, retrieves session metadata from Redis, and attaches `req.user` to incoming requests. All Prisma queries explicitly filter by `userId: req.user.id`, preventing cross-user data leaks.
+
+### Secret Protection
+- Google OAuth Client Secret and SMTP passwords remain strictly server-side.
+- The `GET /api/senders` endpoint explicitly omits `smtpPassword` (`select: { id, email, displayName, createdAt }`).
+
+---
+
+## CSV Bulk Scheduling
+
+ReachInbox provides end-to-end bulk email onboarding via CSV file upload:
+
+### Specifications & Rules
+- **Memory Storage**: Buffered in RAM using Multer (`multer.memoryStorage()`) with a **hard 5 MB file size limit**. No temporary disk files are created.
+- **Parsing Engine**: `csv-parse/sync` with `bom: true`, `trim: true`, and `skip_empty_lines: true`.
+- **Header Detection**: Case-insensitive matching for the `email` header (e.g., `Email`, `EMAIL`, `email`).
+- **Recipient Limit**: Configurable maximum limit of **1000 recipients** per request (`MAX_RECIPIENTS_PER_REQUEST`).
+
+### Example Valid CSV Format
+```csv
+email,name
+alice@example.com,Alice
+bob@example.com,Bob
+charlie@example.com,Charlie
+```
+
+---
+
+## API Reference
+
+### 1. Authentication Endpoints
+
+#### `GET /api/auth/google`
+Initiates Google OAuth 2.0 authentication flow.
+
+#### `GET /api/auth/google/callback`
+Google OAuth callback endpoint. Redirects to `http://localhost:3000/dashboard` on success.
+
+#### `GET /api/auth/me`
+Returns active session profile.
+- **Response (200 OK)**:
+  ```json
+  {
+    "authenticated": true,
+    "user": {
+      "id": "u-12345",
+      "googleId": "google-109",
+      "email": "user@example.com",
+      "name": "Jane Doe",
+      "avatarUrl": "https://lh3.googleusercontent.com/a/default-avatar"
+    }
+  }
+  ```
+
+#### `POST /api/auth/logout`
+Destroys Redis session and clears HTTP-only `reachinbox_sid` cookie.
+
+---
+
+### 2. Email & Sender Management Endpoints
+
+#### `GET /api/senders`
+Returns senders owned by authenticated user.
+- **Response (200 OK)**:
+  ```json
+  {
+    "senders": [
+      {
+        "id": "s-9988",
+        "email": "sender@example.com",
+        "displayName": "Marketing Desk",
+        "createdAt": "2026-08-18T10:00:00.000Z"
+      }
+    ]
+  }
+  ```
+
+#### `POST /api/emails/parse-csv`
+Parses uploaded CSV file and returns recipient analysis.
+- **Content-Type**: `multipart/form-data` (field `file`)
+- **Response (200 OK)**:
+  ```json
+  {
+    "filename": "contacts.csv",
+    "summary": {
+      "totalRows": 4,
+      "validRecipientsCount": 2,
+      "invalidRecipientsCount": 1,
+      "duplicateRecipientsCount": 1,
+      "skippedRowsCount": 1
+    },
+    "validRecipients": ["alice@example.com", "bob@example.com"],
+    "invalidRecipients": ["invalid-email"],
+    "duplicateRecipients": ["alice@example.com"]
+  }
+  ```
+
+#### `POST /api/emails/schedule`
+Schedules single or bulk emails.
+- **Payload**:
+  ```json
+  {
+    "senderId": "s-9988",
+    "subject": "Q3 Product Announcement",
+    "body": "Hello, check out our latest updates!",
+    "startTime": "2026-08-19T10:00:00.000Z",
+    "delayMs": 2000,
+    "recipients": ["alice@example.com", "bob@example.com"]
+  }
+  ```
+- **Response (200 OK)**:
+  ```json
+  {
+    "message": "Email batch scheduling completed",
+    "summary": {
+      "totalRequested": 2,
+      "scheduledCount": 2,
+      "alreadyExistsCount": 0,
+      "invalidRecipientsCount": 0,
+      "failedEnqueueCount": 0
+    },
+    "scheduledEmails": [
+      {
+        "id": "e-101",
+        "recipient": "alice@example.com",
+        "scheduledAt": "2026-08-19T10:00:00.000Z",
+        "status": "SCHEDULED"
+      }
+    ],
+    "skippedDuplicates": [],
+    "invalidRecipients": [],
+    "partialFailures": []
+  }
+  ```
+
+#### `GET /api/emails/scheduled`
+Returns scheduled emails (`status = SCHEDULED`).
+
+#### `GET /api/emails/sent`
+Returns delivered emails (`status = SENT`).
+
+#### `GET /api/emails/failed`
+Returns failed email history (`status = FAILED`).
+
+#### `GET /api/emails/stats`
+Returns aggregated metrics strictly scoped to authenticated user.
+- **Response (200 OK)**:
+  ```json
+  {
+    "scheduledCount": 12,
+    "processingCount": 0,
+    "sentCount": 145,
+    "failedCount": 2,
+    "totalCount": 159,
+    "sendersCount": 2
+  }
+  ```
+
+---
+
+## Frontend UI & Figma Alignment
+
+The ReachInbox frontend was designed to match the 1440x900 desktop Figma email client reference:
+
+- **Canvas Background**: Pure **WHITE (`#FFFFFF`)** across all main views.
+- **Brand Typography**: Dark/black **OMB** logo (`text-slate-900 font-extrabold text-xl`).
+- **Green Accent Palette (`#22C55E` / `emerald-600`)**: Used for `+ Compose` outline, `Send / Send Later` CTAs, active sidebar selection (`bg-emerald-50 text-emerald-700`), recipient chips, and status badges.
+- **Narrow Sidebar (`frontend/src/components/Sidebar.tsx`)**: Lightweight ~220px desktop sidebar.
+- **Compact Email Rows**: Scheduled and Sent views render compact white email rows with recipient, colored time/status badges, subject preview, and favorite stars (`☆`).
+- **Full Composer (`frontend/src/components/ComposeView.tsx`)**: 1440x900 full email-client composer with From dropdown, To field, Upload List CSV button, recipient chips, subject line, delay inputs, rich-text toolbar, and body editor.
+- **Anchored Send Later Popover (`frontend/src/components/SendLaterPopover.tsx`)**: Compact popover positioned adjacent to the clock icon featuring quick presets ("Tomorrow, 10:00 AM", etc.) and custom `datetime-local` selection.
+
+---
+
+## Environment Variables
+
+| Variable Name | Default Value | Description |
+| :--- | :--- | :--- |
+| `NODE_ENV` | `development` | Environment mode (`development` / `production` / `test`) |
+| `PORT` | `5000` | Backend API server port |
+| `DATABASE_URL` | `postgresql://reachinbox_user:reachinbox_pass@postgres:5432/reachinbox_db?schema=public` | PostgreSQL connection string |
+| `POSTGRES_USER` | `reachinbox_user` | Database user |
+| `POSTGRES_PASSWORD` | `reachinbox_pass` | Database password |
+| `POSTGRES_DB` | `reachinbox_db` | Database name |
+| `REDIS_HOST` | `redis` | Redis server hostname |
+| `REDIS_PORT` | `6379` | Redis server port |
+| `FRONTEND_URL` | `http://localhost:3000` | Next.js frontend application URL |
+| `WORKER_CONCURRENCY` | `5` | Concurrent email worker job concurrency |
+| `MAX_RECIPIENTS_PER_REQUEST` | `1000` | Hard limit on recipients per scheduling request |
+| `MIN_EMAIL_DELAY_MS` | `2000` | Minimum delay between emails per sender (ms) |
+| `MAX_EMAILS_PER_HOUR_PER_SENDER` | `100` | Maximum allowed email dispatches per hour per sender |
+| `MAX_CSV_FILE_SIZE_MB` | `5` | Hard limit on CSV upload file size (MB) |
+| `GOOGLE_CLIENT_ID` | `your_google_client_id` | Google OAuth 2.0 Client ID |
+| `GOOGLE_CLIENT_SECRET` | `your_google_client_secret` | Google OAuth 2.0 Client Secret |
+| `GOOGLE_CALLBACK_URL` | `http://localhost:5000/api/auth/google/callback` | OAuth redirect URI |
+| `SESSION_TTL_SECONDS` | `86400` | Redis session expiration time (seconds) |
+| `SESSION_SECRET` | `your_session_secret` | Secret key for signing session cookies |
+
+---
+
+## Docker Infrastructure & Setup
+
+The platform runs as a 5-container architecture managed by Docker Compose:
 
 ```bash
-npm run db:seed
+docker compose up -d
 ```
+
+### Container Topology & Health Checks
+
+| Container Name | Service | Ports | Healthcheck Verification Command |
+| :--- | :--- | :--- | :--- |
+| `reachinbox-postgres` | PostgreSQL 16 | `5433:5432` | `pg_isready -U reachinbox_user -d reachinbox_db` |
+| `reachinbox-redis` | Redis 7 | `6379:6379` | `redis-cli ping` |
+| `reachinbox-backend` | Express API | `5000:5000` | HTTP Readiness check (`depends_on` healthy DB & Redis) |
+| `reachinbox-worker` | BullMQ Worker | - | Process check (`depends_on` healthy DB & Redis) |
+| `reachinbox-frontend` | Next.js App | `3000:3000` | HTTP Readiness check (`depends_on` backend) |
 
 ---
 
-## Current Implementation Status
+## Development & Verification
 
-**Status: Step 7 (Dashboard Scheduled/Sent Management, Analytics & Quick Compose UI) Complete**
+### Local Prerequisites
+- Node.js `v20.x` or higher
+- Docker & Docker Compose
+- npm `v10.x` or higher
 
-* [x] Step 0: Docker architecture set up
-* [x] Step 1A: PostgreSQL + Prisma schema (`User`, `Sender`, `Email`, `EmailStatus`) implemented
-* [x] Step 1B: BullMQ queue (`5.21.2`) & worker process foundation running in Docker
-* [x] Step 2: Email scheduling pipeline, SHA-256 idempotency, state machine transitions.
-* [x] Step 3: Real Ethereal SMTP delivery via Nodemailer (`6.9.16`), sender-specific credentials, preview URLs.
-* [x] Step 4: Distributed Redis Lua Rate Limiting, Minimum Inter-Send Delay, Authoritative Token Rollback, and BullMQ `DelayedError` rescheduling.
-* [x] Step 5: Real Google OAuth 2.0, Redis-backed Session Storage, Express `requireAuth` Middleware, Multi-User Data Isolation, Next.js `/login` & `/dashboard` Auth Foundation.
-* [x] Step 6: Memory-buffered Multer 2.2.0 & csv-parse 5.6.0 CSV Upload, Structural Header Validation, Recipient Sanitization & Preview, Campaign Setup UI, and Bulk Email Scheduling Pipeline.
-* [x] Step 7: Live-on-Refresh Analytics (`GET /api/emails/stats`), Option A API Contracts (`/scheduled`, `/sent`, `/failed`), Scheduled/Sent Management Tables, Quick Compose Modal, and Dashboard Navigation UI.
+### 1. Local Environment Setup
+```bash
+# Clone repository
+git clone https://github.com/outfox-project/reachinbox-assignment.git
+cd reachinbox-assignment
+
+# Copy environment template
+cp .env.example .env
+```
+
+### 2. Start Services via Docker Compose
+```bash
+docker compose build
+docker compose up -d
+```
+
+### 3. Database Migration & Seeding
+```bash
+# Execute Prisma database migrations
+docker exec -it reachinbox-backend npx prisma migrate dev
+
+# Seed test database with initial user & sender credentials
+docker exec -it reachinbox-backend npm run db:seed
+```
+
+### 4. Running Backend Tests & TypeScript Verification
+```bash
+# Run backend TypeScript typecheck
+cd backend
+npx tsc --noEmit
+
+# Execute unit and integration test suite
+npm test
+```
+
+### 5. Accessing Running Applications
+- **Next.js Frontend**: [http://localhost:3000](http://localhost:3000)
+- **Express Backend API**: [http://localhost:5000](http://localhost:5000)
+- **Google OAuth Login**: [http://localhost:5000/api/auth/google](http://localhost:5000/api/auth/google)
